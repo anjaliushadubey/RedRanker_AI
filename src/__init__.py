@@ -1,0 +1,1 @@
+"""RedRanker baseline ranking pipeline."""
