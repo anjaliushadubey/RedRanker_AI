@@ -14,7 +14,24 @@ TOP_N = 100
 PANDAS_CHUNK_SIZE = 50000
 DEFAULT_LOADER = "jsonl"
 REFERENCE_DATE = date(2026, 6, 17)
-ROLE_REQUIRES_HYBRID_OR_ONSITE = True
+ROLE_REQUIRES_HYBRID_OR_ONSITE = False
+
+PREFERRED_OFFICE_LOCATIONS = [
+    "pune",
+    "noida",
+]
+
+WELCOME_INDIA_LOCATIONS = [
+    "hyderabad",
+    "pune",
+    "mumbai",
+    "delhi",
+    "delhi ncr",
+    "ncr",
+    "noida",
+    "gurgaon",
+    "gurugram",
+]
 
 PYTHON_SKILL_NAMES = {"python"}
 IDEAL_EXPERIENCE_YEARS = 7.0
@@ -96,6 +113,37 @@ GENAI_APP_ONLY_TERMS = [
     "tutorial",
 ]
 
+PRE_LLM_ML_PRODUCTION_TERMS = [
+    "machine learning",
+    "ml model",
+    "model deployment",
+    "model serving",
+    "prediction api",
+    "predictive modeling",
+    "churn prediction",
+    "fraud detection",
+    "scikit-learn",
+    "sklearn",
+    "xgboost",
+    "lightgbm",
+    "random forest",
+    "gradient boosting",
+    "pytorch",
+    "tensorflow",
+    "feature engineering",
+    "feature pipeline",
+    "recommendation",
+    "recommender",
+    "ranking",
+    "search relevance",
+    "retrieval",
+    "nlp pipeline",
+    "document classification",
+    "sentiment analysis",
+    "a/b testing",
+    "offline evaluation",
+]
+
 RESEARCH_ONLY_TERMS = [
     "academic lab",
     "academic research",
@@ -112,6 +160,32 @@ RESEARCH_ONLY_TERMS = [
     "thesis",
 ]
 
+RESEARCH_ROLE_TITLE_TERMS = [
+    "research assistant",
+    "research intern",
+    "research scientist",
+    "research engineer",
+    "ai research engineer",
+    "phd researcher",
+    "doctoral researcher",
+    "postdoctoral researcher",
+    "postdoc",
+]
+
+RESEARCH_ENVIRONMENT_TERMS = [
+    "academic lab",
+    "research lab",
+    "university lab",
+    "doctoral lab",
+    "phd lab",
+    "academic research",
+    "research-only",
+    "paper-focused",
+    "publication-focused",
+    "thesis",
+    "conference paper",
+]
+
 PRODUCT_OR_PRODUCTION_TERMS = [
     "production",
     "deployed",
@@ -126,6 +200,148 @@ PRODUCT_OR_PRODUCTION_TERMS = [
     "scale",
     "product",
     "pipeline",
+    "customer-facing",
+    "serving",
+    "live",
+    "integrated",
+    "api",
+    "monitoring",
+]
+
+CULTURE_ASYNC_WRITING_TERMS = [
+    "async",
+    "asynchronous",
+    "documentation",
+    "documented",
+    "design doc",
+    "rfc",
+    "technical writing",
+    "wrote",
+    "written",
+    "docs",
+    "runbook",
+    "playbook",
+]
+
+CULTURE_OWNERSHIP_TERMS = [
+    "owned",
+    "owner",
+    "ownership",
+    "drove",
+    "led",
+    "took responsibility",
+    "end-to-end",
+    "on-call",
+    "accountable",
+]
+
+CULTURE_OPEN_DECISION_TERMS = [
+    "feedback",
+    "trade-off",
+    "tradeoff",
+    "debated",
+    "disagree",
+    "stakeholder",
+    "cross-functional",
+    "decision",
+    "review",
+    "alignment",
+]
+
+CULTURE_FAST_AMBIGUITY_TERMS = [
+    "startup",
+    "0-to-1",
+    "zero-to-one",
+    "ambiguous",
+    "fast-paced",
+    "iterated",
+    "iteration",
+    "experiment",
+    "experimentation",
+    "hypothesis",
+    "assumption",
+    "mvp",
+    "shipped",
+    "launched",
+]
+
+APPLIED_ML_ROLE_TERMS = [
+    "machine learning engineer",
+    "ml engineer",
+    "ai engineer",
+    "applied scientist",
+    "applied ml",
+    "data scientist",
+    "nlp engineer",
+    "search engineer",
+    "recommendation systems engineer",
+    "recommender systems engineer",
+    "ranking engineer",
+    "ml platform",
+    "production ml",
+]
+
+SHIPPED_RANKING_SYSTEM_TERMS = [
+    "ranking system",
+    "ranker",
+    "search system",
+    "search relevance",
+    "recommendation system",
+    "recommender system",
+    "matching system",
+    "candidate matching",
+    "job matching",
+    "retrieval pipeline",
+    "semantic search",
+    "hybrid search",
+    "vector search",
+]
+
+MEANINGFUL_SCALE_TERMS = [
+    "real users",
+    "served users",
+    "customer-facing",
+    "production",
+    "launched",
+    "shipped",
+    "latency",
+    "scale",
+    "10m",
+    "millions",
+    "high-traffic",
+    "large-scale",
+]
+
+RETRIEVAL_JUDGMENT_TERMS = [
+    "hybrid retrieval",
+    "dense retrieval",
+    "sparse retrieval",
+    "bm25",
+    "vector search",
+    "semantic search",
+    "reranking",
+    "re-ranking",
+    "cross-encoder",
+    "bi-encoder",
+    "ann",
+    "faiss",
+    "elasticsearch",
+    "opensearch",
+]
+
+LLM_INTEGRATION_JUDGMENT_TERMS = [
+    "fine-tuning",
+    "fine tuning",
+    "prompt",
+    "prompting",
+    "prompt engineering",
+    "rag",
+    "llm reranking",
+    "llm re-ranking",
+    "guardrails",
+    "hallucination",
+    "latency",
+    "cost",
 ]
 
 REAL_ML_RETRIEVAL_TERMS = [
@@ -161,11 +377,93 @@ TUTORIAL_ONLY_TERMS = [
 CV_SPEECH_ROBOTICS_TERMS = [
     "computer vision",
     "image classification",
+    "image moderation",
+    "image recognition",
     "object detection",
+    "opencv",
+    "resnet",
+    "cnn",
+    "convolutional",
     "speech recognition",
+    "voice ai",
+    "voice recognition",
+    "asr",
     "tts",
+    "text to speech",
     "robotics",
     "slam",
+    "ros",
+]
+
+NLP_IR_EXPOSURE_TERMS = [
+    "nlp",
+    "natural language processing",
+    "information retrieval",
+    "ir",
+    "retrieval",
+    "ranking",
+    "ranker",
+    "learning to rank",
+    "search",
+    "search relevance",
+    "semantic search",
+    "vector search",
+    "hybrid search",
+    "bm25",
+    "elasticsearch",
+    "opensearch",
+    "faiss",
+    "pinecone",
+    "qdrant",
+    "weaviate",
+    "milvus",
+    "embeddings",
+    "document classification",
+    "text classification",
+    "text analytics",
+    "sentiment analysis",
+    "rag",
+    "recommendation",
+    "recommender",
+    "matching system",
+    "candidate matching",
+    "job matching",
+    "ndcg",
+    "mrr",
+    "map",
+]
+
+CLOSED_SOURCE_SYSTEM_TERMS = [
+    "closed-source",
+    "closed source",
+    "proprietary",
+    "internal",
+    "enterprise",
+    "client",
+    "customer-facing",
+    "saas",
+    "b2b",
+    "private",
+    "in-house",
+]
+
+EXTERNAL_VALIDATION_TERMS = [
+    "open source",
+    "opensource",
+    "github",
+    "public repo",
+    "public repository",
+    "published paper",
+    "conference paper",
+    "arxiv",
+    "speaker",
+    "gave a talk",
+    "tech talk",
+    "conference talk",
+    "meetup",
+    "blog",
+    "public project",
+    "kaggle",
 ]
 
 CODING_TERMS = [
@@ -202,6 +500,25 @@ MANAGER_ARCHITECT_TERMS = [
     "program manager",
     "director",
     "head of",
+]
+
+SENIOR_ENGINEER_ROLE_TERMS = [
+    "senior engineer",
+    "senior software engineer",
+    "senior ai engineer",
+    "senior ml engineer",
+    "senior machine learning engineer",
+    "senior backend engineer",
+    "senior data engineer",
+    "lead engineer",
+    "lead ai engineer",
+    "lead ml engineer",
+    "lead machine learning engineer",
+    "lead software engineer",
+    "staff engineer",
+    "staff ai engineer",
+    "staff ml engineer",
+    "staff machine learning engineer",
 ]
 
 RETRIEVAL_TERMS = [
@@ -295,14 +612,16 @@ SERVICE_COMPANIES = [
 ]
 
 FEATURE_WEIGHTS = {
-    "title_fit": 0.14,
-    "experience_fit": 0.12,
-    "retrieval_fit": 0.18,
-    "ranking_fit": 0.14,
-    "production_fit": 0.14,
-    "evaluation_fit": 0.10,
-    "python_fit": 0.10,
-    "product_company_fit": 0.08,
+    "title_fit": 0.09,
+    "experience_fit": 0.08,
+    "retrieval_fit": 0.13,
+    "ranking_fit": 0.11,
+    "production_fit": 0.10,
+    "evaluation_fit": 0.08,
+    "python_fit": 0.07,
+    "product_company_fit": 0.04,
+    "culture_fit": 0.10,
+    "ideal_recruiter_fit": 0.20,
 }
 
 CORE_ASSESSMENT_SKILLS = [

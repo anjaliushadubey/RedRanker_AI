@@ -5,9 +5,11 @@ from __future__ import annotations
 from src.config import FEATURE_WEIGHTS
 from src.features import (
     behavior_multiplier,
+    culture_fit,
     current_title,
     evaluation_fit,
     experience_score,
+    ideal_recruiter_fit,
     product_company_fit,
     production_fit,
     python_skill_score,
@@ -23,6 +25,8 @@ def score_candidate(candidate: dict) -> tuple[float, dict]:
     ranking_score, ranking_terms = ranking_fit(candidate)
     production_score, production_terms = production_fit(candidate)
     evaluation_score, evaluation_terms = evaluation_fit(candidate)
+    culture_score, culture_terms = culture_fit(candidate)
+    ideal_score, ideal_details = ideal_recruiter_fit(candidate)
     product_score, product_seen, service_only = product_company_fit(candidate)
     multiplier, behavior = behavior_multiplier(candidate)
 
@@ -35,6 +39,8 @@ def score_candidate(candidate: dict) -> tuple[float, dict]:
         "evaluation_fit": evaluation_score,
         "python_fit": python_skill_score(candidate),
         "product_company_fit": product_score,
+        "culture_fit": culture_score,
+        "ideal_recruiter_fit": ideal_score,
     }
     weighted_score = sum(scores[name] * FEATURE_WEIGHTS[name] for name in FEATURE_WEIGHTS)
     score = weighted_score * multiplier
@@ -47,6 +53,8 @@ def score_candidate(candidate: dict) -> tuple[float, dict]:
         "ranking_terms": ranking_terms,
         "production_terms": production_terms,
         "evaluation_terms": evaluation_terms,
+        "culture_terms": culture_terms,
+        "ideal_recruiter": ideal_details,
         "product_seen": product_seen,
         "service_only": service_only,
         "behavior_multiplier": multiplier,
