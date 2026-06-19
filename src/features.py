@@ -109,7 +109,9 @@ def has_any_term(text: str, terms: list[str]) -> bool:
 
 def term_in_text(text: str, term: str) -> bool:
     term = term.lower()
-    if len(term) <= 3 and term.replace(".", "").isalnum():
+    if term.replace(".", "").isalnum():
+        if term not in text:
+            return False
         return short_term_pattern(term).search(text) is not None
     return term in text
 

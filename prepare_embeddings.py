@@ -36,6 +36,7 @@ from src.config import (
     DEFAULT_ELIGIBLE_PATH,
     DEFAULT_LOADER,
     DEFAULT_QUERY_EMBEDDINGS_PATH,
+    DEFAULT_REJECTED_PATH,
     DEFAULT_SECTION_EMBEDDINGS_DIR,
     EMBEDDING_BATCH_SIZE,
     EMBEDDING_MAX_SEQ_LENGTH,
@@ -43,7 +44,7 @@ from src.config import (
     SECTION_EMBEDDING_MAX_SEQ_LENGTHS,
 )
 from src.data_loader import load_candidates
-from src.rejector import hard_reject
+from src.rejector import hard_reject_reasons
 from src.retrieval import prepare_retrieval_artifacts, section_embedding_cache_paths
 
 
@@ -59,25 +60,42 @@ def load_or_create_eligible_candidates(
     candidates_path: Path,
     eligible_input: Path | None,
     eligible_out: Path,
+    rejected_out: Path,
     loader: str,
-) -> tuple[list[dict], int, Counter[str]]:
+) -> tuple[list[dict], int, Counter[str], Counter[str]]:
     if eligible_input is not None:
         candidates = list(load_candidates(eligible_input, loader="jsonl"))
-        return candidates, len(candidates), Counter()
+        return candidates, len(candidates), Counter(), Counter()
 
     eligible_candidates: list[dict] = []
     reject_reasons: Counter[str] = Counter()
+    all_reason_codes: Counter[str] = Counter()
     total_candidates = 0
-    with eligible_out.open("w", encoding="utf-8") as eligible_handle:
+    with eligible_out.open("w", encoding="utf-8") as eligible_handle, rejected_out.open(
+        "w", encoding="utf-8"
+    ) as rejected_handle:
         for candidate in load_candidates(candidates_path, loader=loader):
             total_candidates += 1
-            rejected, reason = hard_reject(candidate)
-            if rejected:
-                reject_reasons[reason or "unknown"] += 1
+            reasons = hard_reject_reasons(candidate)
+            if reasons:
+                primary_reason = reasons[0]
+                reject_reasons[primary_reason or "unknown"] += 1
+                all_reason_codes.update(reasons)
+                rejected_handle.write(
+                    json.dumps(
+                        {
+                            "candidate_id": candidate.get("candidate_id"),
+                            "primary_reason": primary_reason,
+                            "reason_codes": reasons,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
                 continue
             eligible_candidates.append(candidate)
             eligible_handle.write(json.dumps(candidate, ensure_ascii=False) + "\n")
-    return eligible_candidates, total_candidates, reject_reasons
+    return eligible_candidates, total_candidates, reject_reasons, all_reason_codes
 
 
 def main() -> None:
@@ -85,6 +103,7 @@ def main() -> None:
     parser.add_argument("--candidates", type=Path, default=DEFAULT_CANDIDATES_PATH)
     parser.add_argument("--eligible-input", type=Path, default=None)
     parser.add_argument("--eligible-out", type=Path, default=DEFAULT_ELIGIBLE_PATH)
+    parser.add_argument("--rejected-out", type=Path, default=DEFAULT_REJECTED_PATH)
     parser.add_argument("--embedding-model", default=EMBEDDING_MODEL_NAME)
     parser.add_argument("--embedding-batch-size", type=int, default=EMBEDDING_BATCH_SIZE)
     parser.add_argument("--embedding-cache-dir", type=Path, default=None)
@@ -107,26 +126,33 @@ def main() -> None:
         default=DEFAULT_LOADER,
         help="Use jsonl for final fast streaming, or pandas for chunked analysis/debugging.",
     )
+    parser.add_argument(
+        "--filter-only",
+        action="store_true",
+        help="Only write eligible/rejected JSONL files and skip embedding/BM25 preparation.",
+    )
     args = parser.parse_args()
 
     started_at = time.perf_counter()
     embedding_cache_dir = resolve_cli_embedding_cache_dir(args.embedding_cache_dir, args.embedding_cache)
-    eligible_candidates, total_candidates, reject_reasons = load_or_create_eligible_candidates(
+    eligible_candidates, total_candidates, reject_reasons, all_reason_codes = load_or_create_eligible_candidates(
         candidates_path=args.candidates,
         eligible_input=args.eligible_input,
         eligible_out=args.eligible_out,
+        rejected_out=args.rejected_out,
         loader=args.loader,
     )
 
-    prepare_retrieval_artifacts(
-        candidates=eligible_candidates,
-        model_name=args.embedding_model,
-        batch_size=args.embedding_batch_size,
-        local_files_only=not args.allow_model_download,
-        embedding_cache_dir=embedding_cache_dir,
-        query_cache_path=args.query_cache,
-        bm25_cache_path=args.bm25_cache,
-    )
+    if not args.filter_only:
+        prepare_retrieval_artifacts(
+            candidates=eligible_candidates,
+            model_name=args.embedding_model,
+            batch_size=args.embedding_batch_size,
+            local_files_only=not args.allow_model_download,
+            embedding_cache_dir=embedding_cache_dir,
+            query_cache_path=args.query_cache,
+            bm25_cache_path=args.bm25_cache,
+        )
 
     if args.eligible_input is not None:
         print(f"Loaded eligible candidates from {args.eligible_input}")
@@ -137,7 +163,17 @@ def main() -> None:
             print("Top rejection reasons:")
             for reason, count in reject_reasons.most_common(10):
                 print(f"  {reason}: {count}")
+            print("Fake AI-fit rejection reasons:")
+            for reason in [
+                "fake_ai_fit_non_target_genai_explorer",
+                "ai_keywords_not_supported_by_career",
+                "ai_productivity_usage_not_ai_engineering",
+                "junior_non_target_ai_keyword_profile",
+                "business_profile_ai_wrapper",
+            ]:
+                print(f"  {reason}: {all_reason_codes.get(reason, 0)}")
         print(f"Wrote eligible JSONL to {args.eligible_out}")
+        print(f"Wrote rejected JSONL to {args.rejected_out}")
     print(f"Eligible candidates: {len(eligible_candidates)}")
     print(f"Embedding model: {args.embedding_model}")
     print(f"Embedding fallback max seq length: {EMBEDDING_MAX_SEQ_LENGTH}")

@@ -10,19 +10,31 @@ from __future__ import annotations
 from datetime import datetime
 
 from src.config import (
+    ADJACENT_TECHNICAL_ROLE_TERMS,
+    AI_EXPLORER_ONLY_TERMS,
+    AI_KEYWORD_TERMS,
+    AI_PRODUCTIVITY_USAGE_TERMS,
+    BUSINESS_NON_TARGET_TERMS,
     CLOSED_SOURCE_SYSTEM_TERMS,
     CODING_TERMS,
     CORE_ASSESSMENT_SKILLS,
     CV_SPEECH_ROBOTICS_TERMS,
     EXTERNAL_VALIDATION_TERMS,
     GENAI_APP_ONLY_TERMS,
+    GENAI_EXPLORER_TERMS,
     HARD_RELEVANCE_TERMS,
     MANAGER_ARCHITECT_TERMS,
     NLP_IR_EXPOSURE_TERMS,
+    NEGATIVE_TITLES,
+    NON_TARGET_ROLE_TERMS,
     PRE_LLM_ML_PRODUCTION_TERMS,
     PRODUCT_OR_PRODUCTION_TERMS,
     RANKING_TERMS,
+    REAL_AI_ENGINEERING_EVIDENCE_TERMS,
+    REAL_AI_CAREER_ANCHOR_TERMS,
+    REAL_AI_EVALUATION_TERMS,
     REAL_ML_RETRIEVAL_TERMS,
+    REAL_CAREER_EVIDENCE_TERMS,
     REFERENCE_DATE,
     RESEARCH_ENVIRONMENT_TERMS,
     RESEARCH_ONLY_TERMS,
@@ -30,6 +42,7 @@ from src.config import (
     RETRIEVAL_TERMS,
     ROLE_REQUIRES_HYBRID_OR_ONSITE,
     SENIOR_ENGINEER_ROLE_TERMS,
+    STRONG_REAL_AI_CAREER_EVIDENCE_CATEGORIES,
 )
 from src.features import candidate_text, current_title, has_any_term, match_terms, normalize
 from src.honeypot import honeypot_score
@@ -37,26 +50,32 @@ from src.honeypot import honeypot_score
 
 def hard_reject(candidate: dict) -> tuple[bool, str | None]:
     """Return whether candidate should be eliminated before scoring."""
+    reasons = hard_reject_reasons(candidate)
+    return bool(reasons), reasons[0] if reasons else None
+
+
+def hard_reject_reasons(candidate: dict) -> list[str]:
+    """Return ordered hard-reject reason codes for audit output."""
     hp_score, hp_reasons = honeypot_score(candidate)
     if hp_score >= 5:
-        return True, f"honeypot_{hp_reasons[0]}"
+        return [f"honeypot_{hp_reasons[0]}"]
 
     text = candidate_text(candidate)
     jd_rejected, jd_reasons = jd_explicit_hard_reject(candidate, text)
     if jd_rejected:
-        return True, jd_reasons[0]
+        return jd_reasons
 
     if not has_any_term(text, HARD_RELEVANCE_TERMS):
-        return True, "no_core_ranking_retrieval_matching_ml_relevance"
+        return ["no_core_ranking_retrieval_matching_ml_relevance"]
 
     if is_closed_source_5y_without_external_validation(candidate):
-        return True, "closed_source_5y_without_external_validation"
+        return ["closed_source_5y_without_external_validation"]
 
     rejected_by_behavior, behavior_reason = redrob_signal_reject(candidate)
     if rejected_by_behavior:
-        return True, behavior_reason
+        return [behavior_reason or "unknown_behavior_reject"]
 
-    return False, None
+    return []
 
 
 def jd_explicit_hard_reject(candidate: dict, text: str) -> tuple[bool, list[str]]:
@@ -74,6 +93,10 @@ def jd_explicit_hard_reject(candidate: dict, text: str) -> tuple[bool, list[str]
 
     if is_cv_speech_robotics_without_nlp_ir(candidate):
         reasons.append("primary_cv_speech_robotics_without_significant_nlp_ir_exposure")
+
+    fake_ai_rejected, fake_ai_reasons = detect_fake_ai_fit(candidate)
+    if fake_ai_rejected:
+        reasons.extend(fake_ai_reasons)
 
     return bool(reasons), reasons
 
@@ -174,6 +197,175 @@ def is_cv_speech_robotics_without_nlp_ir(candidate: dict) -> bool:
 
     primary_cv_speech_robotics = primary_by_profile or primary_by_recent_career or primary_by_skills
     return primary_cv_speech_robotics and not has_significant_nlp_ir
+
+
+def detect_fake_ai_fit(candidate: dict) -> tuple[bool, list[str]]:
+    """Detect fake AI-fit candidates before embeddings are prepared."""
+    reasons: list[str] = []
+    profile = candidate.get("profile", {})
+    current_title_text = normalize(profile.get("current_title"))
+    headline_text = normalize(profile.get("headline"))
+    summary_text = normalize(profile.get("summary"))
+    headline_summary_text = " ".join([headline_text, summary_text])
+    career_title_text = career_titles_text(candidate)
+    career_text = career_history_text(candidate)
+    career_role_text = career_title_text + " " + career_text
+    skill_text = skills_text(candidate)
+
+    if has_strong_real_ai_career_evidence(candidate):
+        add_soft_flag(candidate, "non_cs_background_but_strong_ai_career")
+        return False, []
+
+    if has_adjacent_technical_role(candidate):
+        if not ai_keywords_supported_by_career(candidate):
+            add_soft_flag(candidate, "adjacent_technical_no_retrieval_evidence")
+        return False, []
+
+    title_headline_career_titles = " ".join(
+        [
+            current_title_text,
+            headline_text,
+            career_title_text,
+        ]
+    )
+    current_or_career_non_target = has_any_term(current_title_text + " " + career_title_text, NON_TARGET_ROLE_TERMS)
+    has_non_target_role = has_any_term(title_headline_career_titles, NON_TARGET_ROLE_TERMS)
+    has_genai_explorer_profile = has_any_term(headline_summary_text, GENAI_EXPLORER_TERMS)
+    skill_ai_terms = set(match_terms(skill_text, AI_KEYWORD_TERMS))
+    profile_ai_terms = set(match_terms(headline_summary_text, AI_KEYWORD_TERMS))
+    career_ai_terms = set(match_terms(career_text, AI_KEYWORD_TERMS + REAL_AI_ENGINEERING_EVIDENCE_TERMS))
+    has_career_evidence = ai_keywords_supported_by_career(candidate)
+    ai_terms_only_summary_or_skills = bool(profile_ai_terms or skill_ai_terms) and not career_ai_terms
+    business_career = career_is_mainly_business_or_operations(candidate)
+    productivity_ai_usage = has_any_term(headline_summary_text + " " + career_text, AI_PRODUCTIVITY_USAGE_TERMS)
+    wrapper_ai_context = has_any_term(headline_summary_text + " " + skill_text, AI_KEYWORD_TERMS + GENAI_EXPLORER_TERMS)
+    years = float(profile.get("years_of_experience") or 0.0)
+
+    if (
+        has_non_target_role
+        and has_genai_explorer_profile
+        and len(skill_ai_terms) >= 3
+        and not has_career_evidence
+    ):
+        reasons.append("fake_ai_fit_non_target_genai_explorer")
+
+    if productivity_ai_usage and wrapper_ai_context and not has_career_evidence:
+        reasons.append("ai_productivity_usage_not_ai_engineering")
+
+    if len(skill_ai_terms) >= 5 and current_or_career_non_target and not has_career_evidence:
+        reasons.append("ai_keywords_not_supported_by_career")
+
+    if (
+        years < 3
+        and has_any_term(current_title_text, NON_TARGET_ROLE_TERMS)
+        and ai_terms_only_summary_or_skills
+        and not has_career_evidence
+    ):
+        reasons.append("junior_non_target_ai_keyword_profile")
+
+    if (
+        business_career
+        and (has_genai_explorer_profile or productivity_ai_usage)
+        and ai_terms_only_summary_or_skills
+        and not has_career_evidence
+    ):
+        reasons.append("business_profile_ai_wrapper")
+
+    return bool(reasons), reasons
+
+
+def detect_fake_ai_fit_candidate(candidate: dict) -> tuple[bool, list[str]]:
+    """Backward-compatible alias for older debug helpers."""
+    return detect_fake_ai_fit(candidate)
+
+
+def ai_keywords_supported_by_career(candidate: dict) -> bool:
+    """Return true only when AI/retrieval/ranking evidence appears in career history."""
+    career_text = career_history_text(candidate)
+    return has_any_term(career_text, REAL_AI_CAREER_ANCHOR_TERMS)
+
+
+def has_strong_real_ai_career_evidence(candidate: dict) -> bool:
+    career_text = career_history_text(candidate)
+    matched_categories = {
+        category
+        for category, terms in STRONG_REAL_AI_CAREER_EVIDENCE_CATEGORIES.items()
+        if has_any_term(career_text, terms)
+    }
+    has_ai_anchor = has_any_term(career_text, REAL_AI_CAREER_ANCHOR_TERMS)
+    has_eval_signal = has_any_term(career_text, REAL_AI_EVALUATION_TERMS)
+    return has_ai_anchor and len(matched_categories) >= 2 and (
+        has_eval_signal
+        or "search_retrieval_ranking" in matched_categories
+        or "recommendation_matching" in matched_categories
+        or "production_ml_system_ownership" in matched_categories
+    )
+
+
+def career_is_mainly_business_or_operations(candidate: dict) -> bool:
+    career = candidate.get("career_history", [])
+    if not career:
+        return False
+
+    business_roles = 0
+    for job in career:
+        job_text = " ".join(
+            str(job.get(key) or "")
+            for key in ["title", "industry", "description", "company"]
+        ).lower()
+        if has_any_term(job_text, BUSINESS_NON_TARGET_TERMS):
+            business_roles += 1
+    return business_roles / len(career) >= 0.60
+
+
+def has_adjacent_technical_role(candidate: dict) -> bool:
+    role_text = " ".join(
+        [
+            str(candidate.get("profile", {}).get("current_title") or ""),
+            career_titles_text(candidate),
+        ]
+    ).lower()
+    return has_any_term(role_text, ADJACENT_TECHNICAL_ROLE_TERMS)
+
+
+def add_soft_flag(candidate: dict, flag: str) -> None:
+    flags = candidate.setdefault("_soft_flags", [])
+    if flag not in flags:
+        flags.append(flag)
+
+
+def is_non_tech_ai_keyword_profile_without_career_evidence(candidate: dict) -> bool:
+    current = normalize(current_title(candidate))
+    title_is_non_tech = has_any_term(current, NEGATIVE_TITLES)
+    if not title_is_non_tech:
+        return False
+
+    career_text = career_history_text(candidate)
+    career_ml_hits = match_terms(
+        career_text,
+        PRE_LLM_ML_PRODUCTION_TERMS + REAL_ML_RETRIEVAL_TERMS + RETRIEVAL_TERMS + RANKING_TERMS,
+    )
+    if career_ml_hits:
+        return False
+
+    profile = candidate.get("profile", {})
+    profile_text = " ".join(
+        [
+            str(profile.get("headline") or ""),
+            str(profile.get("summary") or ""),
+            str(profile.get("current_industry") or ""),
+        ]
+    ).lower()
+    skill_text = skills_text(candidate)
+    profile_ai_hits = match_terms(profile_text, GENAI_APP_ONLY_TERMS + AI_EXPLORER_ONLY_TERMS + RETRIEVAL_TERMS)
+    skill_ai_hits = match_terms(
+        skill_text,
+        GENAI_APP_ONLY_TERMS + REAL_ML_RETRIEVAL_TERMS + RETRIEVAL_TERMS + RANKING_TERMS,
+    )
+
+    has_keyword_density = len(set(profile_ai_hits + skill_ai_hits)) >= 4
+    has_ai_explorer_language = has_any_term(profile_text, AI_EXPLORER_ONLY_TERMS)
+    return has_keyword_density or has_ai_explorer_language
 
 
 def is_closed_source_5y_without_external_validation(candidate: dict) -> bool:
@@ -283,6 +475,15 @@ def career_history_text(candidate: dict) -> str:
         )
     text = " ".join(parts).lower()
     candidate["_career_history_text"] = text
+    return text
+
+
+def career_titles_text(candidate: dict) -> str:
+    cached = candidate.get("_career_titles_text")
+    if cached is not None:
+        return cached
+    text = " ".join(str(job.get("title") or "") for job in candidate.get("career_history", [])).lower()
+    candidate["_career_titles_text"] = text
     return text
 
 

@@ -5,6 +5,7 @@ __pycache__/
 submission.csv
 team_*.csv
 eligible_candidates.jsonl
+rejected_candidates.jsonl
 top_2000_candidates.jsonl
 top_2000_candidates.csv
 retrieval_pool_*.jsonl
