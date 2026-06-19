@@ -13,7 +13,7 @@ from src.config import DEFAULT_LOADER, PANDAS_CHUNK_SIZE
 
 def load_candidates_jsonl(path: Path) -> Iterator[dict]:
     """Yield candidates from JSONL using low-overhead Python streaming."""
-    with path.open("r", encoding="utf-8") as handle:
+    with path.open("r", encoding="utf-8-sig") as handle:
         for line in handle:
             if line.strip():
                 yield json.loads(line)

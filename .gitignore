@@ -4,7 +4,20 @@ __pycache__/
 *.csv
 submission.csv
 team_*.csv
+eligible_candidates.jsonl
+top_2000_candidates.jsonl
+top_2000_candidates.csv
+retrieval_pool_*.jsonl
+bm25_scores.npz
+section_embeddings.npz
+title_embeddings.npz
+summary_embeddings.npz
+career_history_embeddings.npz
+skills_embeddings.npz
+query_embeddings.npz
+qdrant_storage/
 candidates.jsonl
 .env
 .DS_Store
+tmp/
 [PUB] India_runs_data_and_ai_challenge/

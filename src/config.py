@@ -10,9 +10,27 @@ from datetime import date
 
 DEFAULT_CANDIDATES_PATH = Path("candidates.jsonl")
 DEFAULT_OUTPUT_PATH = Path("submission.csv")
+DEFAULT_ELIGIBLE_PATH = Path("eligible_candidates.jsonl")
+DEFAULT_TOP_2000_CSV_PATH = Path("top_2000_candidates.csv")
+DEFAULT_TOP_2000_JSONL_PATH = Path("top_2000_candidates.jsonl")
+DEFAULT_BM25_CACHE_PATH = Path("bm25_scores.npz")
+DEFAULT_SECTION_EMBEDDINGS_PATH = Path("section_embeddings.npz")
+DEFAULT_SECTION_EMBEDDINGS_DIR = Path(".")
+DEFAULT_QUERY_EMBEDDINGS_PATH = Path("query_embeddings.npz")
+DEFAULT_QDRANT_PATH = Path("qdrant_storage")
 TOP_N = 100
+TOP_2000_N = 2000
 PANDAS_CHUNK_SIZE = 50000
 DEFAULT_LOADER = "jsonl"
+DEFAULT_DENSE_BACKEND = "numpy"
+EMBEDDING_MODEL_NAME = "sentence-transformers/paraphrase-MiniLM-L3-v2"
+EMBEDDING_BATCH_SIZE = 64
+EMBEDDING_MAX_SEQ_LENGTH = 160
+EMBEDDING_LOCAL_FILES_ONLY = True
+TEXT_BUILDER_VERSION = "v3_summary_no_education_dense"
+EMBEDDING_CACHE_VERSION = TEXT_BUILDER_VERSION
+QDRANT_COLLECTION_NAME = "redranker_section_vectors"
+QDRANT_UPSERT_BATCH_SIZE = 1024
 REFERENCE_DATE = date(2026, 6, 17)
 ROLE_REQUIRES_HYBRID_OR_ONSITE = False
 
@@ -20,6 +38,66 @@ PREFERRED_OFFICE_LOCATIONS = [
     "pune",
     "noida",
 ]
+
+RETRIEVAL_SECTION_WEIGHTS = {
+    "title": 0.12,
+    "summary": 0.18,
+    "career_history": 0.50,
+    "skills": 0.20,
+}
+
+RETRIEVAL_SECTION_MAX_CHARS = {
+    "title": 200,
+    "summary": 900,
+    "career_history": 1600,
+    "skills": 900,
+}
+
+SECTION_EMBEDDING_BATCH_SIZES = {
+    "title": 512,
+    "summary": 256,
+    "career_history": 128,
+    "skills": 256,
+}
+
+SECTION_EMBEDDING_MAX_SEQ_LENGTHS = {
+    "title": 32,
+    "summary": 128,
+    "career_history": 160,
+    "skills": 96,
+}
+
+HYBRID_DENSE_WEIGHT = 0.70
+HYBRID_BM25_WEIGHT = 0.30
+
+JD_SECTION_QUERIES = {
+    "title": (
+        "Senior AI Engineer search engineer recommendation systems engineer "
+        "machine learning engineer applied ML engineer NLP engineer ranking engineer"
+    ),
+    "summary": (
+        "Own the intelligence layer for candidate job matching. Strong product "
+        "engineering mindset, async written communication, fast iteration, "
+        "production ML, retrieval ranking recommendation systems, evaluation, "
+        "shipper mindset."
+    ),
+    "career_history": (
+        "Shipped end-to-end ranking search recommendation retrieval or matching "
+        "systems to real users at meaningful scale. Built production ML services, "
+        "hybrid retrieval, dense retrieval, BM25, vector search, reranking, A/B "
+        "testing, NDCG, MRR, MAP, feedback loops, monitoring, latency."
+    ),
+    "skills": (
+        "Python machine learning NLP information retrieval ranking search "
+        "recommendation systems embeddings vector search semantic search BM25 "
+        "FAISS Elasticsearch OpenSearch Qdrant Pinecone MLOps evaluation LLM "
+        "reranking RAG fine-tuning prompt engineering."
+    ),
+    "education": (
+        "Computer science machine learning artificial intelligence information "
+        "retrieval data science software engineering mathematics statistics."
+    ),
+}
 
 WELCOME_INDIA_LOCATIONS = [
     "hyderabad",

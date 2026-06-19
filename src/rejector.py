@@ -28,6 +28,7 @@ from src.config import (
     RESEARCH_ONLY_TERMS,
     RESEARCH_ROLE_TITLE_TERMS,
     RETRIEVAL_TERMS,
+    ROLE_REQUIRES_HYBRID_OR_ONSITE,
     SENIOR_ENGINEER_ROLE_TERMS,
 )
 from src.features import candidate_text, current_title, has_any_term, match_terms, normalize
@@ -327,6 +328,18 @@ def redrob_signal_reject(candidate: dict) -> tuple[bool, str | None]:
     willing_to_relocate = bool(signals.get("willing_to_relocate"))
     country = normalize(candidate.get("profile", {}).get("country"))
 
+    rejected_by_notice, notice_reason = notice_based_hard_reject(
+        notice_days=notice_days,
+        open_to_work=open_to_work,
+        response_rate=response_rate,
+        days_inactive=days_inactive,
+        interview_rate=interview_rate,
+        preferred_work_mode=preferred_work_mode,
+        willing_to_relocate=willing_to_relocate,
+    )
+    if rejected_by_notice:
+        return True, notice_reason
+
     if response_rate <= 0.05 and response_hours > 168:
         return True, "non_responsive_recruiter_signal"
 
@@ -353,17 +366,59 @@ def redrob_signal_reject(candidate: dict) -> tuple[bool, str | None]:
     if rejected_by_assessment:
         return True, assessment_reason
 
+    if (
+        country
+        and country != "india"
+        and preferred_work_mode == "remote"
+        and not willing_to_relocate
+        and not open_to_work
+        and notice_days > 60
+    ):
+        return True, "outside_india_remote_only_not_open_long_notice"
+
     if preferred_work_mode == "remote" and not willing_to_relocate:
         return True, "remote_only_not_relocatable_for_quarterly_travel"
 
     if country and country != "india" and not willing_to_relocate:
         return True, "outside_india_no_relocation_path_no_visa_sponsorship"
 
-    if notice_days >= 150 and not open_to_work:
-        return True, "long_notice_and_not_open_to_work"
-
     if completeness < 30 and not open_to_work and days_inactive is not None and days_inactive > 90:
         return True, "incomplete_inactive_not_open"
+
+    return False, None
+
+
+def notice_based_hard_reject(
+    notice_days: int,
+    open_to_work: bool,
+    response_rate: float,
+    days_inactive: int | None,
+    interview_rate: object,
+    preferred_work_mode: str,
+    willing_to_relocate: bool,
+) -> tuple[bool, str | None]:
+    """Reject only when long notice combines with low hireability signals."""
+    if notice_days > 120 and not open_to_work:
+        return True, "very_long_notice_and_not_open_to_work"
+
+    if notice_days > 90 and response_rate < 0.20 and not open_to_work:
+        return True, "long_notice_low_response_not_open"
+
+    if notice_days > 90 and days_inactive is not None and days_inactive > 120 and response_rate < 0.25:
+        return True, "long_notice_inactive_low_response"
+
+    if interview_rate is not None:
+        numeric_interview_rate = float(interview_rate)
+        if notice_days > 90 and 0 <= numeric_interview_rate < 0.30:
+            return True, "long_notice_poor_interview_completion"
+
+    if (
+        ROLE_REQUIRES_HYBRID_OR_ONSITE
+        and notice_days > 60
+        and preferred_work_mode == "remote"
+        and not willing_to_relocate
+    ):
+        return True, "long_notice_remote_only_not_relocating"
 
     return False, None
 
