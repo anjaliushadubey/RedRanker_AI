@@ -864,14 +864,14 @@ def jd_match_clause(profile_type: str, candidate: dict | None = None) -> str:
 
 
 def shorten_reasoning(reasoning: str) -> str:
-    if word_count(reasoning) <= 45:
+    if word_count(reasoning) <= 38:
         return reasoning
     sentences = re.split(r"(?<=[.!?])\s+", reasoning)
     trimmed = " ".join(sentences[:2]).strip()
-    if word_count(trimmed) >= 25 and word_count(trimmed) <= 45:
+    if 20 <= word_count(trimmed) <= 38:
         return trimmed
     words = reasoning.split()
-    return " ".join(words[:45]).rstrip(" ,;:") + "."
+    return " ".join(words[:38]).rstrip(" ,;:") + "."
 
 
 def has_career(candidate: dict, terms: list[str]) -> bool:
@@ -1133,13 +1133,29 @@ def exceptional_hireability_note(candidate: dict) -> str:
     verified = bool(s.get("verified_email")) and bool(s.get("verified_phone"))
 
     if notice <= 15 and s.get("open_to_work_flag"):
-        return f"Hireability is unusually clean with {int(notice)}-day notice."
-    if response_rate >= 0.90:
-        return f"Recruiter response rate is exceptional at {response_rate:.2f}."
-    if interview >= 0.95:
-        return f"Interview completion is unusually reliable at {interview:.2f}."
-    if s.get("open_to_work_flag") and notice <= 30 and verified and response_rate >= 0.80:
-        return "Open to work with short notice and verified contact channels."
+        return candidate_variant(candidate, [
+            f"Availability is unusually clean with {int(notice)}-day notice.",
+            f"Short {int(notice)}-day notice makes outreach practical.",
+            f"Open-to-work status and {int(notice)}-day notice help hireability.",
+        ])
+    if response_rate >= 0.85:
+        return candidate_variant(candidate, [
+            f"Recruiter response rate is unusually high at {response_rate:.2f}.",
+            f"Strong {response_rate:.2f} recruiter response rate improves reachability.",
+            f"Outreach risk is lower with a {response_rate:.2f} recruiter response rate.",
+        ])
+    if interview >= 0.90:
+        return candidate_variant(candidate, [
+            f"Interview follow-through is unusually reliable at {interview:.2f}.",
+            f"A {interview:.2f} interview completion rate strengthens process reliability.",
+            f"High interview completion ({interview:.2f}) makes the profile easier to progress.",
+        ])
+    if s.get("open_to_work_flag") and notice <= 30 and verified:
+        return candidate_variant(candidate, [
+            "Open-to-work status, short notice, and verified contacts make outreach practical.",
+            "Short notice plus verified contact channels improves immediate hireability.",
+            "Verified contacts and sub-30-day notice make the process easier to start.",
+        ])
     return ""
 
 
@@ -1385,16 +1401,58 @@ def rank_reason_caveat(result: RerankResult, diffs: list[str], rank: int) -> str
     notice = float(signals(candidate).get("notice_period_days") or 0)
     primary = result.primary_differentiator
     if result.penalties:
-        return result.penalties[0]
+        penalty = result.penalties[0].lower()
+        if "adjacent" in penalty:
+            return phrase_variant(candidate, "penalty-adjacent", [
+                "good adjacent fit, but lacks the ranking-specific depth of higher ranks",
+                "stronger on ML systems than search ranking",
+                "included for production ML depth, not pure retrieval ownership",
+                "relevant, but not as complete as candidates with BM25/retrieval/evaluation evidence",
+                "less direct than the top search/retrieval profiles",
+            ])
+        if "notice" in penalty:
+            return phrase_variant(candidate, "penalty-notice", [
+                "long notice makes the process less immediate",
+                "hireability is weaker because of the notice period",
+                "availability is less clean than similarly strong profiles",
+                "notice period is the main practical concern",
+                "joining timeline is less attractive than shorter-notice candidates",
+            ])
+        return penalty
     if rank > 80:
         if primary in {"production_ml_infrastructure", "adjacent_but_strong_ml_infra", "nlp_embedding_experience", "general_ml_pipeline_experience"}:
-            return "direct search/ranking evidence is lighter than retrieval-heavy profiles"
+            return phrase_variant(candidate, "cutoff-adjacent", [
+                "less direct than the top search/retrieval profiles",
+                "stronger on ML systems than search ranking",
+                "included for production ML depth, not pure retrieval ownership",
+                "good adjacent fit, but lacks the ranking-specific depth of higher ranks",
+                "final-cut profile with useful systems depth rather than complete retrieval ownership",
+                "NLP or ML systems proof is clearer than ranking ownership",
+            ])
         if notice > 90:
-            return "notice period makes hireability less immediate"
-        return "search/retrieval proof is thinner than specialist profiles"
+            return phrase_variant(candidate, "cutoff-notice", [
+                "notice period makes the process less immediate",
+                "hireability is less clean than similarly strong candidates",
+                "longer joining timeline keeps the profile near the cutoff",
+                "availability is the main reason this sits lower",
+            ])
+        return phrase_variant(candidate, "cutoff-core", [
+            "search-ranking proof is narrower than specialist profiles",
+            "less complete than candidates with BM25, retrieval, and evaluation evidence",
+            "kept for relevant systems work, but retrieval depth is thinner",
+            "final-cut candidate with useful relevance signals, not a complete search owner",
+            "ranking/retrieval evidence is present but not as layered as higher profiles",
+        ])
     if rank > 20:
         if "learning_to_rank_ownership" not in diffs and "bm25_to_semantic_migration" not in diffs:
-            return "weaker link to Redrob's ranking upgrade than retrieval-heavy profiles"
+            return phrase_variant(candidate, "mid-caveat", [
+                "less direct than the top search/retrieval profiles",
+                "stronger on ML systems than search ranking",
+                "recommendation or production depth is clearer than retrieval ownership",
+                "evaluation depth is lighter than the highest-ranked search profiles",
+                "relevant, but not as complete as candidates with BM25/retrieval/evaluation evidence",
+                "good applied-ML fit with less explicit ranking-system ownership",
+            ])
     return ""
 
 
@@ -1441,9 +1499,17 @@ def top_evidence_sentence(candidate: dict, diffs: list[str]) -> str:
         sentence = phrase_variant(candidate, "bm25", templates)
         support = []
         if tools:
-            support.append(f"using {tools}")
+            support.append(phrase_variant(candidate, "bm25-tools", [
+                f"with {tools}",
+                f"using {tools} for the retrieval layer",
+                f"where {tools} supported the search stack",
+            ]))
         if evals:
-            support.append(f"validated with {evals}")
+            support.append(phrase_variant(candidate, "bm25-eval", [
+                f"validated with {evals}",
+                f"checked through {evals}",
+                f"measured with {evals}",
+            ]))
         if impact:
             support.append(f"{impact} scale/impact")
         if "learning_to_rank_ownership" in secondary:
@@ -1482,7 +1548,13 @@ def top_evidence_sentence(candidate: dict, diffs: list[str]) -> str:
             support.append(f"{impact} impact/scale")
         result = sentence + (f" with {join_phrases(support, 3)}" if support else "") + "."
         if word_count(result) < 22:
-            result = result.rstrip(".") + "; useful for ranking-quality evaluation and search relevance work."
+            result = result.rstrip(".") + "; " + phrase_variant(candidate, "ltr-short", [
+                "directly useful for ranking-quality measurement and relevance improvement.",
+                "good proof for improving search relevance beyond hand rules.",
+                "valuable for measurable ranking improvements in a matching product.",
+                "stronger than generic ML exposure because it touches ranking quality.",
+                "especially relevant to moving from rule scoring toward measured ranking.",
+            ])
         return result
 
     if "hands_on_retrieval_builder" in diffs:
@@ -1503,7 +1575,14 @@ def top_evidence_sentence(candidate: dict, diffs: list[str]) -> str:
         if impact:
             support.append(f"{impact} scale/impact")
         support_text = f", {join_phrases(support, 3)}" if support else ""
-        return f"{sentence}{support_text}; useful for retrieval-heavy candidate matching and production search-quality work."
+        return f"{sentence}{support_text}; " + phrase_variant(candidate, "retrieval-tail", [
+            "directly relevant to retrieval-heavy candidate matching.",
+            "good proof for production search-quality work.",
+            "useful for matching systems where retrieval quality drives recruiter results.",
+            "stronger search-system signal than generic AI application work.",
+            "maps naturally to candidate discovery and relevance ranking.",
+            "gives concrete retrieval ownership rather than keyword-only AI exposure.",
+        ])
 
     if "recommendation_matching_ownership" in diffs:
         templates = [
@@ -1521,7 +1600,19 @@ def top_evidence_sentence(candidate: dict, diffs: list[str]) -> str:
             "Delivered matching-relevant recommender work",
         ]
         sentence = phrase_variant(candidate, "rec", templates)
-        return sentence + (f" measured with {evals}" if evals else "") + ", useful for candidate-role matching."
+        if evals and "measured" in sentence.lower():
+            eval_text = f", evaluated through {evals}"
+        elif evals:
+            eval_text = f", measured with {evals}"
+        else:
+            eval_text = ""
+        return sentence + eval_text + phrase_variant(candidate, "rec-tail", [
+            ", useful for candidate-role matching.",
+            ", a good bridge into recruiter-candidate relevance.",
+            ", relevant to matching quality rather than generic AI work.",
+            ", helpful for ranking people or items by fit.",
+            ", giving practical matching-system experience.",
+        ])
 
     if "production_ml_infrastructure" in diffs:
         system = system_label(match_terms(career_text(candidate), PRODUCTION_SYSTEM_TERMS), "production ML/feature-pipeline infrastructure")
@@ -1533,7 +1624,13 @@ def top_evidence_sentence(candidate: dict, diffs: list[str]) -> str:
             f"Shipped {system}",
         ]
         sentence = phrase_variant(candidate, "prod", templates)
-        return sentence + (f" with {tools}" if tools else "") + "; useful for applied AI systems."
+        return sentence + (f" with {tools}" if tools else "") + "; " + phrase_variant(candidate, "prod-tail", [
+            "stronger on ML delivery than pure search ranking.",
+            "included for production ML depth, not pure retrieval ownership.",
+            "useful where model serving and reliability matter.",
+            "practical for applied AI systems with backend constraints.",
+            "less direct than the top retrieval profiles, but operationally valuable.",
+        ])
 
     if "adjacent_but_strong_ml_infra" in diffs:
         infra = format_terms(match_terms(career_text(candidate), DATA_INFRA_REASON_TERMS + PRODUCTION_SYSTEM_TERMS), 3)
@@ -1543,8 +1640,16 @@ def top_evidence_sentence(candidate: dict, diffs: list[str]) -> str:
             f"{title} brings {infra or 'ML/data infrastructure'} across {years:.1f} years",
             f"Production AI support comes from {infra or 'feature-pipeline'} infrastructure",
             f"Applied ML infrastructure is the useful signal from this {years:.1f}-year profile",
+            f"Feature-pipeline and data-system work make this {years:.1f}-year profile useful",
+            f"ML infrastructure depth is the clearest reason to keep this {title} profile",
         ]
-        return phrase_variant(candidate, "adjacent-final", templates) + ", though direct search-ranking ownership is lighter."
+        return phrase_variant(candidate, "adjacent-final", templates) + phrase_variant(candidate, "adjacent-tail", [
+            ", with less direct search-ranking ownership than stronger retrieval candidates.",
+            ", stronger on ML systems than search ranking.",
+            ", included for production ML depth rather than pure retrieval ownership.",
+            ", good adjacent fit, but missing deeper ranking-specific proof.",
+            ", relevant but less complete than BM25/retrieval/evaluation profiles.",
+        ])
 
     if "nlp_embedding_experience" in diffs:
         title, years = career_context(candidate)
@@ -1562,7 +1667,13 @@ def top_evidence_sentence(candidate: dict, diffs: list[str]) -> str:
             "Built language-processing ML workflows",
             "Handled NLP systems with retrieval relevance",
         ])
-        return f"{lead}{f' with {tools}' if tools else ''}; {title} with {years:.1f} years, useful for semantic matching though direct ranking ownership is weaker."
+        return f"{lead}{f' with {tools}' if tools else ''}; " + phrase_variant(candidate, "nlp-tail", [
+            f"{title} with {years:.1f} years has semantic-matching value, but lighter ranking ownership.",
+            "embedding/NLP proof is clearer than search-ranking ownership.",
+            "good NLP adjacency, but less complete than direct retrieval builders.",
+            "relevant to semantic matching while still weaker on ranking-system ownership.",
+            "useful for language-heavy matching, not a pure search-ranking specialist.",
+        ])
 
     title, years = career_context(candidate)
     templates = [
@@ -1578,7 +1689,13 @@ def top_evidence_sentence(candidate: dict, diffs: list[str]) -> str:
         f"ML systems delivery, rather than search ownership, is the useful signal here",
         f"The useful evidence is applied ML delivery from a {years:.1f}-year profile",
     ]
-    return phrase_variant(candidate, "general-final", templates) + ", though direct retrieval evidence is limited."
+    return phrase_variant(candidate, "general-final", templates) + phrase_variant(candidate, "general-tail", [
+        ", with direct retrieval evidence still limited.",
+        ", stronger on ML systems than search ranking.",
+        ", included for production ML depth rather than complete retrieval ownership.",
+        ", useful as an adjacent profile, not a top retrieval specialist.",
+        ", relevant but less complete than BM25/retrieval/evaluation profiles.",
+    ])
 
 
 def build_ranked_reasoning(result: RerankResult, rank: int) -> str:
