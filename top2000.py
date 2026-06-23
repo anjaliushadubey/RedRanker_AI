@@ -84,7 +84,7 @@ def build_top_2000(
         f"{section} {weight:.0%}" for section, weight in RETRIEVAL_SECTION_WEIGHTS.items()
     )
     print(f"Dense section weights: {weights_text}")
-    print("Hybrid weights: dense 70%, BM25 30%")
+    print("Hybrid weights: dense 80%, BM25 20%")
     print(f"Elapsed seconds: {time.perf_counter() - started_at:.2f}")
 
 
