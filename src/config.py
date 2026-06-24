@@ -41,10 +41,10 @@ PREFERRED_OFFICE_LOCATIONS = [
 ]
 
 RETRIEVAL_SECTION_WEIGHTS = {
-    "title": 0.12,
-    "summary": 0.18,
-    "career_history": 0.50,
-    "skills": 0.20,
+    "title": 0.10,
+    "summary": 0.15,
+    "career_history": 0.60,
+    "skills": 0.15,
 }
 
 RETRIEVAL_SECTION_MAX_CHARS = {
