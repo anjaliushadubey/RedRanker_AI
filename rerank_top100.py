@@ -982,7 +982,7 @@ def differentiator_opening(candidate: dict, differentiator: str) -> str:
             "Primary edge is direct retrieval implementation",
             "The strongest evidence is search-system implementation",
             "Most relevant proof is building retrieval workflows",
-            "The retrieval case is practical rather than keyword-only",
+           "The retrieval case is backed by actual implementation",
             "Best fit comes from actual search implementation",
             "The clearest plus point is retrieval engineering",
             "Strongest point is hands-on search/retrieval work",
@@ -992,7 +992,7 @@ def differentiator_opening(candidate: dict, differentiator: str) -> str:
             "The retrieval builder signal is the differentiator",
             "Implementation depth in retrieval is the useful edge",
             "Search implementation is the strongest career proof",
-            "The non-keyword proof is retrieval delivery",
+            "The concrete proof is retrieval delivery",
             "Hands-on retrieval work separates this profile",
         ],
         "relevance_labeling_eval_depth": [
@@ -1178,7 +1178,7 @@ def differentiator_sentence(candidate: dict, differentiator: str, reason_codes: 
             "matching Redrob's ranking-quality improvement problem",
             "useful for Redrob's v2 ranking work",
             "close to Redrob's need for measurable search quality",
-            "a better signal than skills-only AI keyword overlap",
+           "practical evidence for moving beyond hand-tuned scoring",
             "directly relevant to improving recruiter-facing search quality",
             "practical evidence for moving beyond hand-tuned scoring",
         ])
@@ -1581,7 +1581,7 @@ def top_evidence_sentence(candidate: dict, diffs: list[str]) -> str:
             "useful for matching systems where retrieval quality drives recruiter results.",
             "stronger search-system signal than generic AI application work.",
             "maps naturally to candidate discovery and relevance ranking.",
-            "gives concrete retrieval ownership rather than keyword-only AI exposure.",
+           "shows concrete retrieval ownership from career history.",
         ])
 
     if "recommendation_matching_ownership" in diffs:
@@ -1876,7 +1876,7 @@ def build_candidate_reasoning(candidate: dict, component_scores: dict[str, float
         elif tools and tools.lower() not in reasoning.lower():
             reasoning = f"{reasoning} Tool evidence includes {tools}."
         else:
-            reasoning = f"{reasoning} The proof comes from career history rather than skills-only matching."
+           reasoning = f"{reasoning} The proof comes from actual career history."
     if word_count(reasoning) < 25:
         reasoning = f"{reasoning} This is useful for the ranking/retrieval role."
     return shorten_reasoning(reasoning)
