@@ -8,6 +8,7 @@ import csv
 import json
 import math
 import re
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -17,6 +18,8 @@ DEFAULT_TOP2000_PATH = Path("top_2000_candidates.jsonl")
 DEFAULT_SUBMISSION_PATH = Path("submission.csv")
 DEFAULT_DEBUG_PATH = Path("rerank_debug_top2000.csv")
 DEFAULT_REJECTED_PATH = Path("rejected_candidates.jsonl")
+DEFAULT_CANDIDATES_PATH = Path("candidates.jsonl")
+DEFAULT_TOP100_JSONL_PATH = Path("top100.jsonl")
 REFERENCE_DATE = date(2026, 6, 20)
 
 TOKEN_CACHE: dict[str, re.Pattern] = {}
@@ -125,6 +128,48 @@ PYTHON_DATA_ML_TERMS = [
     "api",
     "fastapi",
     "model serving",
+]
+
+DIRECT_SEARCH_EVALUATION_EVIDENCE_TERMS = [
+    "learning-to-rank",
+    "learning to rank",
+    "ranking layer",
+    "search relevance",
+    "retrieval system",
+    "semantic search",
+    "vector search",
+    "hybrid retrieval",
+    "bm25",
+    "elasticsearch",
+    "opensearch",
+    "faiss",
+    "qdrant",
+    "pinecone",
+    "relevance labeling",
+    "relevance labels",
+    "human judgments",
+    "human relevance judgments",
+    "click-through data",
+    "ndcg",
+    "mrr",
+    "map",
+    "a/b testing",
+    "offline evaluation",
+    "online evaluation",
+]
+
+WEAK_RANKING_DEPTH_TERMS = [
+    "lighter weight than ranking systems",
+    "less mature than ranking systems",
+    "still building depth",
+    "want to grow into",
+    "beyond the surface level",
+    "not the core of my day",
+    "production deployment was handled by the platform team",
+    "didn't make it to production",
+    "did not make it to production",
+    "pure ml side of the work",
+    "modeling and analysis side",
 ]
 
 AI_SKILL_TERMS = [
@@ -431,6 +476,13 @@ class RerankResult:
     components: dict[str, float]
     penalties: list[str]
     reason_codes: list[str]
+    hireability_penalty: float
+    hireability_reason_codes: list[str]
+    evidence_realism_penalty: float
+    evidence_realism_reason_codes: list[str]
+    seniority_drift_penalty: float
+    senior_ic_alignment_bonus: float
+    seniority_alignment_reason_codes: list[str]
     primary_differentiator: str
     reasoning: str
     row: dict
@@ -584,6 +636,185 @@ def career_sentences(candidate: dict) -> list[str]:
             if sentence:
                 sentences.append(sentence)
     return sentences
+
+
+@dataclass
+class EvidenceRealismIndex:
+    description_counts: Counter[str]
+    sentence_counts: Counter[str]
+    sentence_companies: dict[str, set[str]]
+
+
+def normalize_evidence_text(value: object) -> str:
+    text = normalize(value)
+    text = text.replace("\u2014", "-").replace("\u2013", "-")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" .;,")
+
+
+def career_description_records(candidate: dict) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for job in candidate.get("career_history", []):
+        description = str(job.get("description") or "")
+        normalized = normalize_evidence_text(description)
+        if not normalized:
+            continue
+        records.append({
+            "normalized": normalized,
+            "description": description,
+            "company": str(job.get("company") or ""),
+            "industry": str(job.get("industry") or ""),
+            "duration_months": int(float(job.get("duration_months") or 0)),
+        })
+    return records
+
+
+def build_evidence_realism_index(rows: list[dict]) -> EvidenceRealismIndex:
+    description_counts: Counter[str] = Counter()
+    sentence_counts: Counter[str] = Counter()
+    sentence_companies: dict[str, set[str]] = defaultdict(set)
+
+    for row in rows:
+        candidate = row["candidate"]
+        for record in career_description_records(candidate):
+            description = str(record["normalized"])
+            if len(description) >= 120 and has_any(description, ALL_CAREER_REASON_TERMS):
+                description_counts[description] += 1
+        for job in candidate.get("career_history", []):
+            company = str(job.get("company") or "")
+            text = " ".join(
+                part for part in [
+                    str(job.get("title") or ""),
+                    str(job.get("description") or ""),
+                ]
+                if part
+            )
+            for sentence in re.split(r"(?<=[.!?])\s+", text):
+                normalized = normalize_evidence_text(sentence)
+                if len(normalized) < 70 or not has_any(normalized, ALL_CAREER_REASON_TERMS):
+                    continue
+                sentence_counts[normalized] += 1
+                if company:
+                    sentence_companies[normalized].add(company.lower())
+
+    return EvidenceRealismIndex(
+        description_counts=description_counts,
+        sentence_counts=sentence_counts,
+        sentence_companies=sentence_companies,
+    )
+
+
+def claimed_project_months(description: str) -> list[int]:
+    months = []
+    for match in re.finditer(r"\b(?:over|for|during|across|in)\s+(\d{1,2})\s+months?\b", normalize(description)):
+        months.append(int(match.group(1)))
+    return months
+
+
+def has_duration_contradiction(candidate: dict) -> bool:
+    for record in career_description_records(candidate):
+        duration = int(record["duration_months"])
+        if duration <= 0:
+            continue
+        for claimed_months in claimed_project_months(str(record["description"])):
+            if claimed_months > duration + 1:
+                return True
+    return False
+
+
+def has_domain_mismatch(candidate: dict) -> bool:
+    compatible = [
+        "e-commerce",
+        "ecommerce",
+        "commerce",
+        "retail",
+        "marketplace",
+        "shopping",
+        "internet",
+        "consumer internet",
+    ]
+    incompatible = [
+        "gaming",
+        "sports",
+        "paper products",
+        "banking",
+        "insurance",
+        "manufacturing",
+        "it services",
+        "consulting",
+    ]
+    for record in career_description_records(candidate):
+        description = str(record["normalized"])
+        industry = normalize(record["industry"])
+        company = normalize(record["company"])
+        if not has_any(description, ["e-commerce search product", "ecommerce search product", "e-commerce search", "ecommerce search"]):
+            continue
+        if any(term in industry or term in company for term in compatible):
+            continue
+        if any(term in industry or term in company for term in incompatible):
+            return True
+    return False
+
+
+def evidence_realism_penalty(
+    candidate: dict,
+    index: EvidenceRealismIndex,
+    strong_technical: bool = False,
+) -> tuple[float, list[str]]:
+    penalty = 0.0
+    reason_codes: list[str] = []
+    description_counts = Counter(str(record["normalized"]) for record in career_description_records(candidate))
+
+    for description, own_count in description_counts.items():
+        corpus_count = index.description_counts.get(description, 0)
+        if own_count > 1:
+            penalty += 0.035
+            reason_codes.append("duplicate_description_within_candidate")
+        if corpus_count >= 3 and has_any(description, ALL_CAREER_REASON_TERMS):
+            penalty += 0.018 + min(0.025, 0.004 * (corpus_count - 3))
+            reason_codes.append("repeated_career_description_across_candidates")
+
+    repeated_sentence_hits = 0
+    for sentence in career_sentences(candidate):
+        normalized = normalize_evidence_text(sentence)
+        if len(normalized) < 70 or not has_any(normalized, ALL_CAREER_REASON_TERMS):
+            continue
+        corpus_count = index.sentence_counts.get(normalized, 0)
+        company_count = len(index.sentence_companies.get(normalized, set()))
+        if corpus_count >= 4 and company_count >= 3:
+            repeated_sentence_hits += 1
+
+    if repeated_sentence_hits:
+        penalty += min(0.04, 0.012 * repeated_sentence_hits)
+        reason_codes.append("repeated_template_evidence_sentences")
+
+    if has_duration_contradiction(candidate):
+        penalty += 0.04
+        reason_codes.append("project_duration_exceeds_role_duration")
+
+    if has_domain_mismatch(candidate):
+        penalty += 0.018
+        reason_codes.append("company_domain_description_mismatch")
+
+    unique_support = 0
+    if extract_impact_signals(candidate):
+        unique_support += 1
+    if concise_eval(candidate):
+        unique_support += 1
+    if has_any(career_text(candidate), ["latency", "monitoring", "model serving", "feature pipeline", "pipeline", "api"]):
+        unique_support += 1
+    if reason_codes and unique_support >= 2:
+        penalty *= 0.75
+
+    hard_realism_issue = any(
+        code in reason_codes
+        for code in ["project_duration_exceeds_role_duration", "duplicate_description_within_candidate"]
+    )
+    if strong_technical and unique_support >= 2 and not hard_realism_issue:
+        cap = 0.02
+    else:
+        cap = 0.08 if strong_technical else 0.12
+    return min(penalty, cap), unique_ordered(reason_codes, 8)
 
 
 def same_sentence_evidence(candidate: dict, terms: list[str], verbs: list[str]) -> tuple[str, list[str]] | None:
@@ -1374,7 +1605,7 @@ def differentiator_proof(candidate: dict, diff: str) -> str:
         p = profile(candidate)
         title = str(p.get("current_title") or "senior technical profile")
         years = float(p.get("years_of_experience") or 0.0)
-        return f"{title} with {years:.1f} years; career text uses implementation verbs around ML/retrieval systems, not only leadership language"
+        return f"{title} with {years:.1f} years has hands-on ML/retrieval delivery rather than pure management"
     if diff == "adjacent_but_strong_ml_infra":
         infra = format_terms(match_terms(career, DATA_INFRA_REASON_TERMS + PRODUCTION_SYSTEM_TERMS), 3)
         return f"brings {infra or 'ML/data infrastructure'} and feature-pipeline exposure"
@@ -1441,7 +1672,7 @@ def rank_reason_caveat(result: RerankResult, diffs: list[str], rank: int) -> str
             "less complete than candidates with BM25, retrieval, and evaluation evidence",
             "kept for relevant systems work, but retrieval depth is thinner",
             "final-cut candidate with useful relevance signals, not a complete search owner",
-            "ranking/retrieval evidence is present but not as layered as higher profiles",
+            "ranking/retrieval evidence is present but less complete than higher profiles",
         ])
     if rank > 20:
         if "learning_to_rank_ownership" not in diffs and "bm25_to_semantic_migration" not in diffs:
@@ -1460,7 +1691,7 @@ def career_context(candidate: dict) -> tuple[str, float]:
     p = profile(candidate)
     title = str(p.get("current_title") or "Applied ML profile")
     years = float(p.get("years_of_experience") or 0.0)
-    if years >= 5 and title.lower().startswith("junior "):
+    if title.lower().startswith("junior "):
         title = title[7:].strip() or "Applied ML profile"
     return title, years
 
@@ -1469,6 +1700,69 @@ def phrase_variant(candidate: dict, key: str, variants: list[str]) -> str:
     seed = f"{candidate.get('candidate_id', '')}-{key}"
     index = sum((idx + 1) * ord(char) for idx, char in enumerate(seed)) % len(variants)
     return variants[index]
+
+
+def hireability_tradeoff_note(result: RerankResult) -> str:
+    if result.hireability_penalty < 0.035:
+        return ""
+    candidate = result.row["candidate"]
+    codes = set(result.hireability_reason_codes)
+    s = signals(candidate)
+    notice = int(float(s.get("notice_period_days") or 0))
+
+    if "notice_120_plus_not_open" in codes:
+        return phrase_variant(candidate, "hire-note-120-not-open", [
+            f"Strong technical fit, but {notice}-day notice and not-open status weaken immediate hireability.",
+            f"Technical proof is convincing; {notice}-day notice plus not-open status is the practical concern.",
+            f"Search evidence remains valuable, but {notice}-day notice and not-open status push the profile lower.",
+        ])
+    if "notice_120_plus" in codes:
+        return phrase_variant(candidate, "hire-note-120", [
+            f"Strong technical fit, but {notice}-day notice weakens immediate hireability.",
+            f"Technical proof is convincing; joining timeline is the main practical concern at {notice} days.",
+            f"{notice}-day notice keeps the profile below similarly strong, faster-moving candidates.",
+        ])
+    if "notice_90_plus" in codes:
+        return phrase_variant(candidate, "hire-note-90", [
+            f"Ranked lower mainly due to {notice}-day notice.",
+            f"Technical fit is convincing; {notice}-day notice is the main practical tradeoff.",
+            f"{notice}-day notice keeps the profile behind similar candidates with cleaner availability.",
+        ])
+    if {"low_recruiter_response", "very_slow_response_low_response_rate", "unverified_contacts_low_response"} & codes:
+        return phrase_variant(candidate, "hire-note-reach", [
+            "Strong search evidence, but reachability signals are weaker than nearby candidates.",
+            "Technical fit is solid; recruiter response and contact signals make outreach riskier.",
+            "Good technical proof, but weak response/contact signals reduce immediate hiring confidence.",
+        ])
+    if "weak_interview_completion" in codes:
+        return phrase_variant(candidate, "hire-note-interview", [
+            "Technical fit is useful, but interview follow-through is weaker than nearby candidates.",
+            "Search/ML evidence remains relevant; process reliability is the practical concern.",
+            "Good systems evidence, but low interview completion keeps the profile lower.",
+        ])
+    return phrase_variant(candidate, "hire-note-general", [
+        "Technical fit is useful, but hireability signals are weaker than nearby candidates.",
+        "Good technical evidence, with practical availability risk keeping the profile lower.",
+        "Strong enough technically, though Redrob engagement signals are less clean.",
+    ])
+
+
+def append_reasoning_note(reasoning: str, note: str, max_words: int = 38) -> str:
+    if not note:
+        return reasoning
+    combined = f"{reasoning.rstrip('.;')}; {note}"
+    if word_count(combined) <= max_words:
+        return combined
+    lead = re.split(r";\s+|(?<=[.!?])\s+", reasoning.strip())[0].strip()
+    combined = f"{lead.rstrip('.;')}; {note}"
+    if word_count(combined) <= max_words:
+        return combined
+    note_words = note.split()
+    remaining = max_words - word_count(lead) - 1
+    if remaining >= 8:
+        short_note = " ".join(note_words[:remaining]).rstrip(" ,;:") + "."
+        return f"{lead.rstrip('.;')}; {short_note}"
+    return shorten_reasoning(reasoning)
 
 
 def top_evidence_sentence(candidate: dict, diffs: list[str]) -> str:
@@ -1581,7 +1875,7 @@ def top_evidence_sentence(candidate: dict, diffs: list[str]) -> str:
             "useful for matching systems where retrieval quality drives recruiter results.",
             "stronger search-system signal than generic AI application work.",
             "maps naturally to candidate discovery and relevance ranking.",
-           "shows concrete retrieval ownership from career history.",
+            "shows concrete retrieval ownership from career history.",
         ])
 
     if "recommendation_matching_ownership" in diffs:
@@ -1706,17 +2000,20 @@ def build_ranked_reasoning(result: RerankResult, rank: int) -> str:
         diffs.insert(0, primary)
     tier = rank_tier(rank)
     caveat = rank_reason_caveat(result, diffs, rank)
+    hireability_tradeoff = hireability_tradeoff_note(result)
     hireability = exceptional_hireability_note(candidate)
 
     reasoning = top_evidence_sentence(candidate, diffs)
-    if tier in {"solid", "cutoff"} and caveat:
+    if hireability_tradeoff and (rank <= 60 or result.hireability_penalty >= 0.07):
+        reasoning = append_reasoning_note(reasoning, hireability_tradeoff)
+    elif tier in {"solid", "cutoff"} and caveat:
         reasoning = f"{reasoning.rstrip('.;')} ; {caveat}."
 
-    if hireability and rank <= 40 and word_count(reasoning) <= 34:
+    if not hireability_tradeoff and hireability and rank <= 40 and word_count(reasoning) <= 32:
         reasoning = f"{reasoning} {hireability}"
 
     reasoning = re.sub(r"\s+", " ", reasoning).replace(" ,", ",").replace(" ;", ";").strip()
-    if word_count(reasoning) < 22:
+    if word_count(reasoning) < 20:
         evals = concise_eval(candidate, 2)
         tools = concise_tools(candidate, 2)
         if evals and evals.lower() not in reasoning.lower():
@@ -1726,13 +2023,15 @@ def build_ranked_reasoning(result: RerankResult, rank: int) -> str:
         else:
             addition = phrase_variant(candidate, "short-final", [
                 "Useful for recruiter-facing search workflows.",
-                "Useful for production AI delivery work.",
+                "Practical for applied ML delivery.",
                 "Helpful for ranking-quality improvement work.",
                 "Adds practical ML systems depth.",
                 "Relevant to applied retrieval systems.",
+                "Supports production matching-system work.",
+                "Adds useful systems depth for candidate discovery.",
             ])
             reasoning = f"{reasoning} {addition}"
-    if word_count(reasoning) < 22:
+    if word_count(reasoning) < 20:
         reasoning = f"{reasoning} Useful for retrieval-heavy matching work."
     return shorten_reasoning(reasoning)
 
@@ -1860,15 +2159,12 @@ def opening_for(profile_type: str, candidate: dict) -> str:
 
 def build_candidate_reasoning(candidate: dict, component_scores: dict[str, float], reason_codes: list[str]) -> str:
     differentiator = determine_primary_differentiator(candidate, component_scores)
-    reasoning = differentiator_sentence(candidate, differentiator, reason_codes)
-    hireability = exceptional_hireability_note(candidate)
-
-    variant_gate = sum(ord(char) for char in str(candidate.get("candidate_id") or "")) % 4 == 0
-    if hireability and variant_gate and word_count(reasoning) <= 36:
-        reasoning = f"{reasoning} {hireability}"
-
+    diffs = candidate_differentiators(candidate, component_scores)
+    if differentiator not in diffs:
+        diffs.insert(0, differentiator)
+    reasoning = top_evidence_sentence(candidate, diffs)
     reasoning = re.sub(r"\s+", " ", reasoning).replace(" ,", ",").strip()
-    if word_count(reasoning) < 25:
+    if word_count(reasoning) < 20:
         evals = concise_eval(candidate, 2)
         tools = concise_tools(candidate, 2)
         if evals and evals.lower() not in reasoning.lower():
@@ -1876,8 +2172,8 @@ def build_candidate_reasoning(candidate: dict, component_scores: dict[str, float
         elif tools and tools.lower() not in reasoning.lower():
             reasoning = f"{reasoning} Tool evidence includes {tools}."
         else:
-           reasoning = f"{reasoning} The proof comes from actual career history."
-    if word_count(reasoning) < 25:
+            reasoning = f"{reasoning} Useful for applied ranking/retrieval work."
+    if word_count(reasoning) < 20:
         reasoning = f"{reasoning} This is useful for the ranking/retrieval role."
     return shorten_reasoning(reasoning)
 
@@ -2055,6 +2351,20 @@ def penalty_factors(candidate: dict, career_score: float, hands_on_score: float)
         penalties.append("unsupported AI skills")
         reason_codes.append("unsupported_ai_skills_penalty")
 
+    if career_score <= 0.45 and has_any(summary + " " + skills, AI_SKILL_TERMS) and not has_any(career, ALL_CAREER_REASON_TERMS):
+        factor *= 0.72
+        penalties.append("weak direct JD evidence in career history")
+        reason_codes.append("weak_direct_jd_career_evidence_penalty")
+
+    if (
+        career_score >= 0.75
+        and has_any(career + " " + summary, WEAK_RANKING_DEPTH_TERMS)
+        and not has_any(career, DIRECT_SEARCH_EVALUATION_EVIDENCE_TERMS)
+    ):
+        factor *= 0.70
+        penalties.append("self-described weak ranking/retrieval depth")
+        reason_codes.append("weak_ranking_depth_language_penalty")
+
     if has_any(summary, GENAI_EXPLORER_TERMS) and career_score <= 0.45:
         factor *= 0.50
         penalties.append("GenAI explorer language with weak career evidence")
@@ -2075,21 +2385,337 @@ def penalty_factors(candidate: dict, career_score: float, hands_on_score: float)
         penalties.append("leadership-only retrieval evidence")
         reason_codes.append("leadership_only_penalty")
 
-    notice = float(signals(candidate).get("notice_period_days") or 0)
-    open_to_work = bool(signals(candidate).get("open_to_work_flag"))
-    if notice > 120 and not open_to_work:
-        factor *= 0.75
-        penalties.append("long notice and not open to work")
-        reason_codes.append("very_long_notice_penalty")
-    elif notice > 90:
-        factor *= 0.90
-        penalties.append("long notice")
-        reason_codes.append("long_notice_penalty")
-
     return factor, penalties, reason_codes
 
 
-def rerank_row(row: dict) -> RerankResult:
+def strong_technical_candidate(career_score: float, pillar_score: float, primary_differentiator: str) -> bool:
+    return (
+        career_score >= 0.75
+        or pillar_score >= 0.75
+        or primary_differentiator in {
+            "learning_to_rank_ownership",
+            "bm25_to_semantic_migration",
+            "hands_on_retrieval_builder",
+            "large_scale_search_system",
+            "relevance_labeling_eval_depth",
+        }
+    )
+
+
+def hireability_risk(candidate: dict, strong_technical: bool = False) -> tuple[float, list[str]]:
+    s = signals(candidate)
+    p = profile(candidate)
+    penalty = 0.0
+    reason_codes: list[str] = []
+
+    notice = float(s.get("notice_period_days") if s.get("notice_period_days") is not None else 0)
+    open_to_work = bool(s.get("open_to_work_flag"))
+    response_rate = float(s.get("recruiter_response_rate") if s.get("recruiter_response_rate") is not None else 0.0)
+    response_hours = float(s.get("avg_response_time_hours") if s.get("avg_response_time_hours") is not None else 999.0)
+    interview = float(s.get("interview_completion_rate") if s.get("interview_completion_rate") is not None else -1.0)
+    verified_email = bool(s.get("verified_email"))
+    verified_phone = bool(s.get("verified_phone"))
+    github_activity = float(s.get("github_activity_score") if s.get("github_activity_score") is not None else -1.0)
+    country = normalize(p.get("country"))
+    preferred_work_mode = normalize(s.get("preferred_work_mode"))
+    willing_to_relocate = bool(s.get("willing_to_relocate"))
+
+    if notice >= 120:
+        if not open_to_work:
+            penalty += 0.14
+            reason_codes.append("notice_120_plus_not_open")
+        else:
+            penalty += 0.09
+            reason_codes.append("notice_120_plus")
+    elif notice >= 90:
+        penalty += 0.04
+        reason_codes.append("notice_90_plus")
+        if not open_to_work:
+            penalty += 0.03
+            reason_codes.append("notice_90_plus_not_open")
+    elif notice >= 60:
+        penalty += 0.015
+        reason_codes.append("notice_60")
+
+    if not open_to_work:
+        if notice >= 90:
+            penalty += 0.02
+            reason_codes.append("not_open_long_notice")
+        elif strong_technical:
+            penalty += 0.01
+            reason_codes.append("not_open_small_risk")
+        else:
+            penalty += 0.02
+            reason_codes.append("not_open")
+
+    if response_rate < 0.30:
+        penalty += 0.045
+        reason_codes.append("low_recruiter_response")
+    elif response_rate < 0.50:
+        penalty += 0.018
+        reason_codes.append("below_average_recruiter_response")
+
+    if response_hours > 168 and response_rate < 0.50:
+        penalty += 0.04
+        reason_codes.append("very_slow_response_low_response_rate")
+    elif response_hours > 72:
+        penalty += 0.015
+        reason_codes.append("slow_response_time")
+
+    if 0 <= interview < 0.50:
+        penalty += 0.05
+        reason_codes.append("weak_interview_completion")
+    elif 0.50 <= interview < 0.70:
+        penalty += 0.02
+        reason_codes.append("below_average_interview_completion")
+
+    if not verified_email and not verified_phone:
+        if response_rate < 0.50:
+            penalty += 0.065
+            reason_codes.append("unverified_contacts_low_response")
+        else:
+            penalty += 0.04
+            reason_codes.append("unverified_contacts")
+    elif not verified_email or not verified_phone:
+        penalty += 0.005
+        reason_codes.append("partially_verified_contact")
+
+    if github_activity == -1:
+        penalty += 0.005
+        reason_codes.append("github_activity_unknown")
+    elif github_activity == 0 and not strong_technical:
+        penalty += 0.01
+        reason_codes.append("github_activity_zero_weak_technical")
+
+    if country and country != "india":
+        if not willing_to_relocate:
+            penalty += 0.025 if strong_technical else 0.04
+            reason_codes.append("outside_india_not_relocating")
+    if preferred_work_mode == "remote" and not willing_to_relocate:
+        penalty += 0.01
+        reason_codes.append("remote_only_not_relocating")
+
+    cap = 0.15 if strong_technical else 0.20
+    return min(penalty, cap), unique_ordered(reason_codes, 12)
+
+
+SENIORITY_DRIFT_TERMS = [
+    "tech-lead roles",
+    "tech lead roles",
+    "tech-lead role",
+    "tech lead role",
+    "architecture",
+    "architectural roadmap",
+    "roadmap",
+    "strategy",
+    "team lead",
+    "leadership role",
+    "management track",
+]
+
+RECENT_LEADERSHIP_OWNERSHIP_TERMS = LEADERSHIP_VERBS + [
+    "ownership",
+    "owner",
+    "tech lead",
+    "team lead",
+    "architect",
+    "architecture",
+    "roadmap",
+    "strategy",
+    "stakeholder",
+    "stakeholders",
+    "planning",
+    "reviews",
+    "reviewed",
+    "people management",
+]
+
+STRONG_RECENT_HANDS_ON_VERBS = [
+    "built",
+    "implemented",
+    "developed",
+    "designed",
+    "deployed",
+    "shipped",
+    "optimized",
+    "debugged",
+    "integrated",
+    "coded",
+    "migrated",
+]
+
+CURRENT_ROLE_BUILDER_VERBS = [
+    "built",
+    "implemented",
+    "developed",
+    "deployed",
+    "shipped",
+    "coded",
+    "migrated",
+]
+
+
+def recent_career_text(candidate: dict, months: int = 18) -> str:
+    threshold = (REFERENCE_DATE.year * 12 + REFERENCE_DATE.month) - months
+    parts: list[str] = []
+    for job in candidate.get("career_history", []):
+        start = parse_date(job.get("start_date"))
+        end = parse_date(job.get("end_date")) or REFERENCE_DATE
+        if not end:
+            continue
+        end_month = end.year * 12 + end.month
+        is_current = bool(job.get("is_current"))
+        if is_current or end_month >= threshold:
+            parts.extend(
+                str(job.get(key) or "")
+                for key in ["title", "industry", "description", "company"]
+            )
+    return normalize(" ".join(parts))
+
+
+def current_or_latest_career_text(candidate: dict) -> str:
+    current_jobs = [
+        job for job in candidate.get("career_history", [])
+        if bool(job.get("is_current"))
+    ]
+    if not current_jobs:
+        jobs = list(candidate.get("career_history", []))
+        if jobs:
+            current_jobs = [
+                max(
+                    jobs,
+                    key=lambda job: (
+                        parse_date(job.get("end_date"))
+                        or parse_date(job.get("start_date"))
+                        or REFERENCE_DATE
+                    ),
+                )
+            ]
+    parts: list[str] = []
+    for job in current_jobs:
+        parts.extend(
+            str(job.get(key) or "")
+            for key in ["title", "industry", "description", "company"]
+        )
+    return normalize(" ".join(parts))
+
+
+def has_recent_hands_on_production(candidate: dict) -> bool:
+    recent = recent_career_text(candidate, months=18)
+    if not recent:
+        return False
+    has_hands_on = has_any(recent, HANDS_ON_VERBS)
+    has_production_or_core = has_any(
+        recent,
+        PRODUCTION_TERMS
+        + RANKING_RETRIEVAL_TERMS
+        + RECOMMENDATION_MATCHING_TERMS
+        + EMBEDDING_VECTOR_TERMS
+        + EVALUATION_TERMS,
+    )
+    return has_hands_on and has_production_or_core
+
+
+def has_recent_strong_hands_on_production(candidate: dict) -> bool:
+    recent = recent_career_text(candidate, months=18)
+    if not recent:
+        return False
+    has_hands_on = has_any(recent, STRONG_RECENT_HANDS_ON_VERBS)
+    has_production_or_core = has_any(
+        recent,
+        PRODUCTION_TERMS
+        + RANKING_RETRIEVAL_TERMS
+        + RECOMMENDATION_MATCHING_TERMS
+        + EMBEDDING_VECTOR_TERMS
+        + EVALUATION_TERMS,
+    )
+    return has_hands_on and has_production_or_core
+
+
+def has_current_builder_evidence(candidate: dict) -> bool:
+    current = current_or_latest_career_text(candidate)
+    if not current:
+        return False
+    has_builder_verb = has_any(current, CURRENT_ROLE_BUILDER_VERBS)
+    has_production_or_core = has_any(
+        current,
+        PRODUCTION_TERMS
+        + RANKING_RETRIEVAL_TERMS
+        + RECOMMENDATION_MATCHING_TERMS
+        + EMBEDDING_VECTOR_TERMS
+        + EVALUATION_TERMS,
+    )
+    return has_builder_verb and has_production_or_core
+
+
+def seniority_alignment_adjustment(
+    candidate: dict,
+    strong_technical: bool,
+    hireability_penalty: float,
+    evidence_realism_penalty: float,
+) -> tuple[float, float, list[str]]:
+    profile_text = normalize(
+        " ".join(
+            str(profile(candidate).get(key) or "")
+            for key in ["headline", "summary", "current_title"]
+        )
+    )
+    if not strong_technical:
+        return 0.0, 0.0, []
+
+    reason_codes: list[str] = []
+    drift_penalty = 0.0
+    senior_ic_bonus = 0.0
+    has_drift_language = has_any(profile_text, SENIORITY_DRIFT_TERMS)
+    explicit_tech_lead_roles = has_any(profile_text, ["tech-lead roles", "tech lead roles"])
+    recent_text = recent_career_text(candidate, months=18)
+    recent_leadership = has_any(recent_text, RECENT_LEADERSHIP_OWNERSHIP_TERMS)
+    recent_hands_on = has_recent_hands_on_production(candidate)
+    recent_strong_hands_on = has_recent_strong_hands_on_production(candidate)
+    current_builder_evidence = has_current_builder_evidence(candidate)
+
+    penalty_options: list[float] = []
+
+    if recent_leadership:
+        if recent_strong_hands_on:
+            penalty_options.append(0.030)
+            reason_codes.append("recent_leadership_with_hands_on_builder_evidence")
+        else:
+            penalty_options.append(0.060)
+            reason_codes.append("recent_leadership_ownership_with_weak_hands_on")
+
+    if has_drift_language:
+        if explicit_tech_lead_roles:
+            if current_builder_evidence:
+                reason_codes.append("tech_lead_aspiration_offset_by_current_builder_evidence")
+            else:
+                penalty_options.append(0.020)
+                reason_codes.append("tech_lead_aspiration_without_current_builder_evidence")
+        elif recent_hands_on:
+            penalty_options.append(0.020)
+            reason_codes.append("architecture_or_strategy_language_with_recent_hands_on")
+        else:
+            penalty_options.append(0.050)
+            reason_codes.append("tech_lead_or_architecture_drift_without_recent_hands_on")
+
+    if penalty_options:
+        drift_penalty = max(penalty_options)
+
+    explicit_senior_ic = has_any(profile_text, ["senior ic", "senior individual contributor"])
+    if (
+        explicit_senior_ic
+        and recent_hands_on
+        and not has_drift_language
+        and hireability_penalty == 0
+        and evidence_realism_penalty <= 0.02
+    ):
+        senior_ic_bonus = 0.035
+        reason_codes.append("explicit_senior_ic_hands_on_alignment")
+
+    return drift_penalty, senior_ic_bonus, reason_codes
+
+
+def rerank_row(row: dict, realism_index: EvidenceRealismIndex) -> RerankResult:
     candidate = row["candidate"]
     original_hybrid = float(row.get("hybrid_score") or 0.0)
     career_score = career_evidence_score(candidate)
@@ -2109,7 +2735,6 @@ def rerank_row(row: dict) -> RerankResult:
         + 0.05 * location_score
     )
     penalty_factor, penalties, reason_codes = penalty_factors(candidate, career_score, hands_score)
-    final = clamp(base * penalty_factor)
     components = {
         "career_evidence_score": career_score,
         "jd_pillar_score": pillar_score,
@@ -2120,6 +2745,26 @@ def rerank_row(row: dict) -> RerankResult:
         "penalty_factor": penalty_factor,
     }
     primary = determine_primary_differentiator(candidate, components)
+    strong_technical = strong_technical_candidate(career_score, pillar_score, primary)
+    hireability_penalty, hireability_reason_codes = hireability_risk(candidate, strong_technical)
+    realism_penalty, realism_reason_codes = evidence_realism_penalty(candidate, realism_index, strong_technical)
+    seniority_drift_penalty, senior_ic_bonus, seniority_alignment_reason_codes = seniority_alignment_adjustment(
+        candidate,
+        strong_technical,
+        hireability_penalty,
+        realism_penalty,
+    )
+    final = clamp(
+        (base * penalty_factor)
+        - hireability_penalty
+        - realism_penalty
+        - seniority_drift_penalty
+        + senior_ic_bonus
+    )
+    components["hireability_penalty"] = hireability_penalty
+    components["evidence_realism_penalty"] = realism_penalty
+    components["seniority_drift_penalty"] = seniority_drift_penalty
+    components["senior_ic_alignment_bonus"] = senior_ic_bonus
     return RerankResult(
         candidate_id=str(candidate["candidate_id"]),
         original_rank=int(row.get("rank") or 0),
@@ -2128,6 +2773,13 @@ def rerank_row(row: dict) -> RerankResult:
         components=components,
         penalties=penalties,
         reason_codes=reason_codes,
+        hireability_penalty=hireability_penalty,
+        hireability_reason_codes=hireability_reason_codes,
+        evidence_realism_penalty=realism_penalty,
+        evidence_realism_reason_codes=realism_reason_codes,
+        seniority_drift_penalty=seniority_drift_penalty,
+        senior_ic_alignment_bonus=senior_ic_bonus,
+        seniority_alignment_reason_codes=seniority_alignment_reason_codes,
         primary_differentiator=primary,
         reasoning=build_candidate_reasoning(candidate, components, reason_codes),
         row=row,
@@ -2158,17 +2810,49 @@ def load_rejected_ids(path: Path) -> set[str]:
     return rejected
 
 
+def ranked_output_rows(results: list[RerankResult]) -> list[tuple[int, RerankResult, float]]:
+    rows: list[tuple[int, RerankResult, float]] = []
+    previous_score: float | None = None
+    for rank, result in enumerate(results, start=1):
+        score = round(result.final_score, 6)
+        if previous_score is not None and score >= previous_score:
+            score = max(0.0, previous_score - 0.000001)
+        previous_score = score
+        rows.append((rank, result, score))
+    return rows
+
+
 def write_submission(results: list[RerankResult], path: Path) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["candidate_id", "rank", "score", "reasoning"])
-        previous_score: float | None = None
-        for rank, result in enumerate(results, start=1):
-            score = round(result.final_score, 6)
-            if previous_score is not None and score >= previous_score:
-                score = max(0.0, previous_score - 0.000001)
-            previous_score = score
+        for rank, result, score in ranked_output_rows(results):
             writer.writerow([result.candidate_id, rank, f"{score:.6f}", result.reasoning])
+
+
+def write_top100_jsonl(results: list[RerankResult], path: Path, candidates_path: Path) -> None:
+    target_ids = [result.candidate_id for result in results]
+    target_set = set(target_ids)
+    raw_by_id: dict[str, str] = {}
+
+    with candidates_path.open("r", encoding="utf-8") as source:
+        for line in source:
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            candidate_id = str(payload.get("candidate_id") or "")
+            if candidate_id in target_set:
+                raw_by_id[candidate_id] = line.rstrip("\r\n")
+                if len(raw_by_id) == len(target_set):
+                    break
+
+    missing = [candidate_id for candidate_id in target_ids if candidate_id not in raw_by_id]
+    if missing:
+        raise ValueError(f"Top100 candidates missing from {candidates_path}: {missing[:5]}")
+
+    with path.open("w", encoding="utf-8") as handle:
+        for candidate_id in target_ids:
+            handle.write(raw_by_id[candidate_id] + "\n")
 
 
 def write_debug(results: list[RerankResult], path: Path) -> None:
@@ -2186,20 +2870,52 @@ def write_debug(results: list[RerankResult], path: Path) -> None:
             "redrob_score",
             "location_availability_score",
             "penalty_factor",
+            "hireability_penalty",
+            "evidence_realism_penalty",
+            "seniority_drift_penalty",
+            "senior_ic_alignment_bonus",
             "penalties",
             "reason_codes",
+            "hireability_reason_codes",
+            "evidence_realism_reason_codes",
+            "seniority_alignment_reason_codes",
+            "notice_period_days",
+            "open_to_work_flag",
+            "recruiter_response_rate",
+            "avg_response_time_hours",
+            "interview_completion_rate",
+            "verified_email",
+            "verified_phone",
+            "github_activity_score",
         ]
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for result in results:
+            candidate = result.row["candidate"]
+            s = signals(candidate)
             row = {
                 "candidate_id": result.candidate_id,
                 "original_rank": result.original_rank,
                 "original_hybrid_score": f"{result.original_hybrid_score:.6f}",
                 "final_score": f"{result.final_score:.6f}",
                 "primary_differentiator": result.primary_differentiator,
+                "hireability_penalty": f"{result.hireability_penalty:.6f}",
+                "evidence_realism_penalty": f"{result.evidence_realism_penalty:.6f}",
+                "seniority_drift_penalty": f"{result.seniority_drift_penalty:.6f}",
+                "senior_ic_alignment_bonus": f"{result.senior_ic_alignment_bonus:.6f}",
                 "penalties": ";".join(result.penalties),
                 "reason_codes": ";".join(result.reason_codes),
+                "hireability_reason_codes": ";".join(result.hireability_reason_codes),
+                "evidence_realism_reason_codes": ";".join(result.evidence_realism_reason_codes),
+                "seniority_alignment_reason_codes": ";".join(result.seniority_alignment_reason_codes),
+                "notice_period_days": s.get("notice_period_days", ""),
+                "open_to_work_flag": s.get("open_to_work_flag", ""),
+                "recruiter_response_rate": s.get("recruiter_response_rate", ""),
+                "avg_response_time_hours": s.get("avg_response_time_hours", ""),
+                "interview_completion_rate": s.get("interview_completion_rate", ""),
+                "verified_email": s.get("verified_email", ""),
+                "verified_phone": s.get("verified_phone", ""),
+                "github_activity_score": s.get("github_activity_score", ""),
             }
             for key, value in result.components.items():
                 row[key] = f"{value:.6f}"
@@ -2218,8 +2934,8 @@ def validate_submission(results: list[RerankResult], rejected_ids: set[str]) -> 
         raise ValueError("Missing reasoning in final top100")
     for result in results:
         words = word_count(result.reasoning)
-        if words < 22 or words > 40:
-            raise ValueError(f"Reasoning length outside 22-40 words for {result.candidate_id}: {words}")
+        if words < 20 or words > 38:
+            raise ValueError(f"Reasoning length outside 20-38 words for {result.candidate_id}: {words}")
     if any(math.isnan(result.final_score) for result in results):
         raise ValueError("NaN score in final top100")
     for previous, current in zip(results, results[1:]):
@@ -2232,10 +2948,10 @@ def validate_submission(results: list[RerankResult], rejected_ids: set[str]) -> 
         prefixes[prefix] = prefixes.get(prefix, 0) + 1
         start = " ".join(result.reasoning.lower().split()[:3])
         starts[start] = starts.get(start, 0) + 1
-    repeated = {prefix: count for prefix, count in prefixes.items() if count > 4}
+    repeated = {prefix: count for prefix, count in prefixes.items() if count > 5}
     if repeated:
         raise ValueError(f"Reasoning prefix repeated too often: {repeated}")
-    repeated_starts = {start: count for start, count in starts.items() if count > 4}
+    repeated_starts = {start: count for start, count in starts.items() if count > 5}
     if repeated_starts:
         raise ValueError(f"Reasoning start repeated too often: {repeated_starts}")
     banned_phrases = [
@@ -2279,13 +2995,26 @@ def validate_submission(results: list[RerankResult], rejected_ids: set[str]) -> 
         for phrase in banned_phrases:
             if phrase.lower() in result.reasoning.lower():
                 raise ValueError(f"Banned repeated/filler phrase in {result.candidate_id}: {phrase}")
+    limited_phrases = [
+        "useful for ranking-quality evaluation and search relevance work",
+        "weaker link to Redrob's ranking upgrade than retrieval-heavy profiles",
+        "useful for semantic matching though direct ranking ownership is weaker",
+        "search/retrieval proof is thinner than specialist profiles",
+        "useful for production AI delivery work",
+    ]
+    for phrase in limited_phrases:
+        count = sum(1 for result in results if phrase.lower() in result.reasoning.lower())
+        if count > 5:
+            raise ValueError(f"Repeated tradeoff phrase too frequent ({count}): {phrase}")
     hireability_rows = [
         result for result in results
         if any(marker in result.reasoning for marker in [
-            "Hireability is unusually clean",
-            "Recruiter response rate is exceptional",
-            "Interview completion is unusually reliable",
-            "Open to work with short notice",
+            "Availability is unusually clean",
+            "recruiter response rate",
+            "Interview follow-through",
+            "Open-to-work status",
+            "Short notice",
+            "verified contact",
         ])
     ]
     if len(hireability_rows) > 25:
@@ -2299,11 +3028,19 @@ def validate_submission(results: list[RerankResult], rejected_ids: set[str]) -> 
             raise ValueError(f"Top50 candidate lacks career-history evidence in reasoning terms: {result.candidate_id}")
 
 
-def rerank(top2000_path: Path, rejected_path: Path, submission_path: Path, debug_path: Path) -> None:
+def rerank(
+    top2000_path: Path,
+    rejected_path: Path,
+    candidates_path: Path,
+    submission_path: Path,
+    debug_path: Path,
+    top100_jsonl_path: Path,
+) -> None:
     rejected_ids = load_rejected_ids(rejected_path)
     rows = load_top2000(top2000_path)
+    realism_index = build_evidence_realism_index(rows)
     results = [
-        rerank_row(row)
+        rerank_row(row, realism_index)
         for row in rows
         if str(row.get("candidate_id") or row.get("candidate", {}).get("candidate_id")) not in rejected_ids
     ]
@@ -2313,21 +3050,25 @@ def rerank(top2000_path: Path, rejected_path: Path, submission_path: Path, debug
         result.reasoning = build_ranked_reasoning(result, rank)
     validate_submission(selected, rejected_ids)
     write_submission(selected, submission_path)
+    write_top100_jsonl(selected, top100_jsonl_path, candidates_path)
     write_debug(results, debug_path)
     print(f"Loaded top2000 rows: {len(rows)}")
     print(f"Reranked candidates: {len(results)}")
     print(f"Wrote submission: {submission_path}")
+    print(f"Wrote top100 JSONL from {candidates_path}: {top100_jsonl_path}")
     print(f"Wrote debug CSV: {debug_path}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evidence-based rerank from top2000 to final top100 submission")
     parser.add_argument("--input", type=Path, default=DEFAULT_TOP2000_PATH)
+    parser.add_argument("--candidates", type=Path, default=DEFAULT_CANDIDATES_PATH)
     parser.add_argument("--out", type=Path, default=DEFAULT_SUBMISSION_PATH)
     parser.add_argument("--debug-out", type=Path, default=DEFAULT_DEBUG_PATH)
+    parser.add_argument("--top100-jsonl", type=Path, default=DEFAULT_TOP100_JSONL_PATH)
     parser.add_argument("--rejected", type=Path, default=DEFAULT_REJECTED_PATH)
     args = parser.parse_args()
-    rerank(args.input, args.rejected, args.out, args.debug_out)
+    rerank(args.input, args.rejected, args.candidates, args.out, args.debug_out, args.top100_jsonl)
 
 
 if __name__ == "__main__":

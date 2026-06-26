@@ -1,10 +1,3 @@
-"""Honeypot and profile-consistency checks.
-
-Honeypots are different from weak candidates: they often look attractive to
-keyword-based systems but contain impossible timelines, impossible skill
-durations, or contradictions between skill claims and career evidence.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -36,6 +29,7 @@ class HoneypotFinding:
 def honeypot_score(candidate: dict) -> tuple[int, list[str]]:
     findings: list[HoneypotFinding] = []
     findings.extend(date_consistency_findings(candidate))
+    findings.extend(project_duration_consistency_findings(candidate))
     findings.extend(skill_duration_findings(candidate))
     findings.extend(role_overlap_findings(candidate))
     findings.extend(profile_consistency_findings(candidate))
@@ -69,6 +63,26 @@ def date_consistency_findings(candidate: dict) -> list[HoneypotFinding]:
             findings.append(HoneypotFinding("future_dated_role_end", 5))
         if start and end and end < start:
             findings.append(HoneypotFinding("role_end_before_start", 5))
+    return findings
+
+
+def project_duration_consistency_findings(candidate: dict) -> list[HoneypotFinding]:
+    findings: list[HoneypotFinding] = []
+    for job in candidate.get("career_history", []):
+        role_duration = int(float(job.get("duration_months") or 0))
+        if role_duration <= 0:
+            continue
+        description = normalize(job.get("description"))
+        claimed_months = [
+            int(match.group(1))
+            for match in re.finditer(
+                r"\b(?:over|for|during|across|in)\s+(\d{1,2})\s+months?\b",
+                description,
+            )
+        ]
+        if any(months > role_duration + 1 for months in claimed_months):
+            findings.append(HoneypotFinding("project_duration_exceeds_role_duration", 5))
+            break
     return findings
 
 
@@ -157,7 +171,7 @@ def profile_consistency_findings(candidate: dict) -> list[HoneypotFinding]:
         actual_months = ((end.year - start.year) * 12) + (end.month - start.month) + 1
         declared_months = int(job.get("duration_months") or 0)
         if abs(actual_months - declared_months) > 12:
-            findings.append(HoneypotFinding("role_duration_does_not_match_dates", 3))
+            findings.append(HoneypotFinding("role_duration_does_not_match_dates", 5))
             break
 
     career_starts = [
