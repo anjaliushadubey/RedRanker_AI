@@ -30,7 +30,11 @@ from src.config import (
     EMBEDDING_MODEL_NAME,
     HYBRID_BM25_WEIGHT,
     HYBRID_DENSE_WEIGHT,
+    JD_QUERY_BUILDER_VERSION,
+    JD_SECTION_MAX_SEQ_LENGTHS,
     JD_SECTION_QUERIES,
+    JD_SECTION_WEIGHTS,
+    JD_TO_CANDIDATE_SECTION_WEIGHTS,
     QDRANT_COLLECTION_NAME,
     QDRANT_UPSERT_BATCH_SIZE,
     SECTION_EMBEDDING_BATCH_SIZES,
@@ -153,7 +157,7 @@ def section_weighted_dense_scores_from_embeddings(
     candidate_count = len(next(iter(section_texts.values()), []))
     if candidate_count == 0:
         return np.array([], dtype=float), {
-            section: np.array([], dtype=float) for section in RETRIEVAL_SECTION_WEIGHTS
+            section: np.array([], dtype=float) for section in JD_SECTION_WEIGHTS
         }
 
     candidate_ids_digest = ordered_values_hash(candidate_ids)
@@ -229,6 +233,34 @@ def section_names() -> list[str]:
     return list(RETRIEVAL_SECTION_WEIGHTS.keys())
 
 
+def jd_section_names() -> list[str]:
+    return list(JD_SECTION_WEIGHTS.keys())
+
+
+def validate_jd_dense_config() -> None:
+    candidate_sections = set(section_names())
+    jd_sections = set(jd_section_names())
+    missing_queries = jd_sections.difference(JD_SECTION_QUERIES)
+    missing_mappings = jd_sections.difference(JD_TO_CANDIDATE_SECTION_WEIGHTS)
+    if missing_queries:
+        raise ValueError(f"Missing JD section queries: {', '.join(sorted(missing_queries))}")
+    if missing_mappings:
+        raise ValueError(f"Missing JD-to-candidate section mappings: {', '.join(sorted(missing_mappings))}")
+    jd_weight_total = sum(float(weight) for weight in JD_SECTION_WEIGHTS.values())
+    if abs(jd_weight_total - 1.0) > 1e-6:
+        raise ValueError(f"JD section weights must sum to 1.0, got {jd_weight_total:.6f}")
+    for jd_section, mapping in JD_TO_CANDIDATE_SECTION_WEIGHTS.items():
+        unknown_sections = set(mapping).difference(candidate_sections)
+        if unknown_sections:
+            unknown = ", ".join(sorted(unknown_sections))
+            raise ValueError(f"JD section {jd_section} maps to unknown candidate sections: {unknown}")
+        mapping_total = sum(float(weight) for weight in mapping.values())
+        if abs(mapping_total - 1.0) > 1e-6:
+            raise ValueError(
+                f"JD mapping weights for {jd_section} must sum to 1.0, got {mapping_total:.6f}"
+            )
+
+
 def stable_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
@@ -246,13 +278,26 @@ def ordered_values_hash(values: list[str]) -> str:
 
 
 def query_text_hash() -> str:
-    ordered_queries = {section: JD_SECTION_QUERIES[section] for section in section_names()}
+    ordered_queries = {section: JD_SECTION_QUERIES[section] for section in jd_section_names()}
     return sha256_text(stable_json(ordered_queries))
 
 
 def section_weights_hash() -> str:
     ordered_weights = {section: RETRIEVAL_SECTION_WEIGHTS[section] for section in section_names()}
     return sha256_text(stable_json(ordered_weights))
+
+
+def jd_section_weights_hash() -> str:
+    ordered_weights = {section: JD_SECTION_WEIGHTS[section] for section in jd_section_names()}
+    return sha256_text(stable_json(ordered_weights))
+
+
+def jd_candidate_mapping_hash() -> str:
+    ordered_mapping = {
+        section: JD_TO_CANDIDATE_SECTION_WEIGHTS[section]
+        for section in jd_section_names()
+    }
+    return sha256_text(stable_json(ordered_mapping))
 
 
 def section_limits_hash() -> str:
@@ -264,8 +309,17 @@ def section_max_seq_length(section: str) -> int:
     return SECTION_EMBEDDING_MAX_SEQ_LENGTHS.get(section, EMBEDDING_MAX_SEQ_LENGTH)
 
 
+def jd_section_max_seq_length(section: str) -> int:
+    return JD_SECTION_MAX_SEQ_LENGTHS.get(section, EMBEDDING_MAX_SEQ_LENGTH)
+
+
 def section_max_seq_lengths_hash() -> str:
     ordered_lengths = {section: section_max_seq_length(section) for section in section_names()}
+    return sha256_text(stable_json(ordered_lengths))
+
+
+def jd_section_max_seq_lengths_hash() -> str:
+    ordered_lengths = {section: jd_section_max_seq_length(section) for section in jd_section_names()}
     return sha256_text(stable_json(ordered_lengths))
 
 
@@ -321,11 +375,29 @@ def build_cache_metadata(
         "section_weights_hash": section_weights_hash(),
         "section_limits_hash": section_limits_hash(),
         "section_max_seq_lengths_hash": section_max_seq_lengths_hash(),
-        "query_text_hash": query_text_hash(),
         "candidate_ids_hash": candidate_ids_digest,
         "candidate_count": candidate_count,
         "embedding_dimension": embedding_dimension,
         "embedding_max_seq_length": EMBEDDING_MAX_SEQ_LENGTH,
+    }
+
+
+def build_query_cache_metadata(
+    model_name: str,
+    embedding_dimension: int,
+) -> dict[str, object]:
+    return {
+        "cache_version": EMBEDDING_CACHE_VERSION,
+        "text_builder_version": TEXT_BUILDER_VERSION,
+        "query_builder_version": JD_QUERY_BUILDER_VERSION,
+        "model_name": model_name,
+        "candidate_section_names": section_names(),
+        "jd_section_names": jd_section_names(),
+        "jd_section_weights_hash": jd_section_weights_hash(),
+        "jd_to_candidate_section_weights_hash": jd_candidate_mapping_hash(),
+        "jd_section_max_seq_lengths_hash": jd_section_max_seq_lengths_hash(),
+        "query_text_hash": query_text_hash(),
+        "embedding_dimension": embedding_dimension,
     }
 
 
@@ -334,6 +406,7 @@ def build_bm25_metadata(candidate_ids_digest: str, candidate_count: int) -> dict
         "cache_version": EMBEDDING_CACHE_VERSION,
         "text_builder_version": TEXT_BUILDER_VERSION,
         "section_names": section_names(),
+        "jd_section_names": jd_section_names(),
         "section_limits_hash": section_limits_hash(),
         "query_text_hash": query_text_hash(),
         "candidate_ids_hash": candidate_ids_digest,
@@ -524,11 +597,12 @@ def load_query_vector_cache(
     query_cache_path: Path | None,
     model_name: str,
 ) -> dict[str, np.ndarray] | None:
+    validate_jd_dense_config()
     if query_cache_path is None or not query_cache_path.exists():
         return None
 
     data = np.load(query_cache_path, allow_pickle=False)
-    required_sections = section_names()
+    required_sections = jd_section_names()
     if not all(f"{section}_query" in data for section in required_sections):
         print(f"Ignoring stale query embedding cache at {query_cache_path}")
         return None
@@ -538,10 +612,8 @@ def load_query_vector_cache(
         print(f"Ignoring malformed query embedding cache at {query_cache_path}")
         return None
 
-    expected_metadata = build_cache_metadata(
+    expected_metadata = build_query_cache_metadata(
         model_name=model_name,
-        candidate_ids_digest=None,
-        candidate_count=None,
         embedding_dimension=int(first_query.shape[0]),
     )
     cached_metadata = load_metadata(data)
@@ -565,11 +637,10 @@ def save_query_vector_cache(
     if query_cache_path is None:
         return
     query_cache_path.parent.mkdir(parents=True, exist_ok=True)
-    first_query = np.asarray(query_vectors[section_names()[0]], dtype=np.float32)
-    metadata = build_cache_metadata(
+    validate_jd_dense_config()
+    first_query = np.asarray(query_vectors[jd_section_names()[0]], dtype=np.float32)
+    metadata = build_query_cache_metadata(
         model_name=model_name,
-        candidate_ids_digest=None,
-        candidate_count=None,
         embedding_dimension=int(first_query.shape[0]),
     )
     payload: dict[str, np.ndarray] = {
@@ -595,7 +666,7 @@ def build_missing_embeddings(
 
     if query_vectors is None:
         query_vectors = {}
-        for section in section_names():
+        for section in jd_section_names():
             jobs.append(("query", section, None))
             encode_inputs.append(JD_SECTION_QUERIES[section])
 
@@ -616,7 +687,7 @@ def build_missing_embeddings(
 
     position = 0
     if query_vectors == {}:
-        for section in section_names():
+        for section in jd_section_names():
             query_vectors[section] = encoded[position]
             position += 1
 
@@ -704,9 +775,10 @@ def encode_section_texts(
 
 
 def encode_query_vectors(model: "SentenceTransformer") -> dict[str, np.ndarray]:
+    validate_jd_dense_config()
     query_vectors: dict[str, np.ndarray] = {}
-    for section in section_names():
-        model.max_seq_length = section_max_seq_length(section)
+    for section in jd_section_names():
+        model.max_seq_length = jd_section_max_seq_length(section)
         vector = encode_texts(
             model,
             [JD_SECTION_QUERIES[section]],
@@ -745,6 +817,7 @@ def qdrant_dense_scores_from_vectors(
     qdrant_path: Path | None,
     index_metadata: dict[str, object],
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    validate_jd_dense_config()
     client: QdrantClient | None = None
     try:
         client = make_qdrant_client(qdrant_path)
@@ -763,25 +836,35 @@ def qdrant_dense_scores_from_vectors(
 
         candidate_count = len(next(iter(section_vectors.values())))
         dense_total: np.ndarray | None = None
-        section_scores: dict[str, np.ndarray] = {}
-        for section, weight in RETRIEVAL_SECTION_WEIGHTS.items():
-            scores = qdrant_section_scores(
-                client=client,
-                collection_name=collection_name,
-                section=section,
-                query_vector=query_vectors[section],
-                candidate_count=candidate_count,
-            )
-            normalized_section_scores = normalize_scores(scores)
-            section_scores[section] = normalized_section_scores
+        jd_scores: dict[str, np.ndarray] = {}
+        for jd_section, jd_weight in JD_SECTION_WEIGHTS.items():
+            mapped_total: np.ndarray | None = None
+            for candidate_section, candidate_weight in JD_TO_CANDIDATE_SECTION_WEIGHTS[jd_section].items():
+                scores = qdrant_section_scores(
+                    client=client,
+                    collection_name=collection_name,
+                    section=candidate_section,
+                    query_vector=query_vectors[jd_section],
+                    candidate_count=candidate_count,
+                )
+                normalized_scores = normalize_scores(scores)
+                mapped_total = (
+                    normalized_scores * candidate_weight
+                    if mapped_total is None
+                    else mapped_total + (normalized_scores * candidate_weight)
+                )
+            if mapped_total is None:
+                mapped_total = np.zeros(candidate_count, dtype=float)
+            normalized_jd_scores = normalize_scores(mapped_total)
+            jd_scores[jd_section] = normalized_jd_scores * jd_weight
             dense_total = (
-                normalized_section_scores * weight
+                normalized_jd_scores * jd_weight
                 if dense_total is None
-                else dense_total + (normalized_section_scores * weight)
+                else dense_total + (normalized_jd_scores * jd_weight)
             )
         if dense_total is None:
             dense_total = np.array([], dtype=float)
-        return normalize_scores(dense_total), section_scores
+        return normalize_scores(dense_total), jd_scores
     finally:
         if client is not None:
             client.close()
@@ -856,20 +939,32 @@ def numpy_section_weighted_dense_scores(
     section_vectors: dict[str, np.ndarray],
     query_vectors: dict[str, np.ndarray],
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    validate_jd_dense_config()
     dense_total: np.ndarray | None = None
-    section_scores: dict[str, np.ndarray] = {}
-    for section, weight in RETRIEVAL_SECTION_WEIGHTS.items():
-        scores = np.asarray(section_vectors[section] @ query_vectors[section], dtype=float)
-        normalized_section_scores = normalize_scores(scores)
-        section_scores[section] = normalized_section_scores
+    jd_scores: dict[str, np.ndarray] = {}
+    candidate_count = len(next(iter(section_vectors.values()), []))
+    for jd_section, jd_weight in JD_SECTION_WEIGHTS.items():
+        mapped_total: np.ndarray | None = None
+        for candidate_section, candidate_weight in JD_TO_CANDIDATE_SECTION_WEIGHTS[jd_section].items():
+            scores = np.asarray(section_vectors[candidate_section] @ query_vectors[jd_section], dtype=float)
+            normalized_scores = normalize_scores(scores)
+            mapped_total = (
+                normalized_scores * candidate_weight
+                if mapped_total is None
+                else mapped_total + (normalized_scores * candidate_weight)
+            )
+        if mapped_total is None:
+            mapped_total = np.zeros(candidate_count, dtype=float)
+        normalized_jd_scores = normalize_scores(mapped_total)
+        jd_scores[jd_section] = normalized_jd_scores * jd_weight
         dense_total = (
-            normalized_section_scores * weight
+            normalized_jd_scores * jd_weight
             if dense_total is None
-            else dense_total + (normalized_section_scores * weight)
+            else dense_total + (normalized_jd_scores * jd_weight)
         )
     if dense_total is None:
         dense_total = np.array([], dtype=float)
-    return normalize_scores(dense_total), section_scores
+    return normalize_scores(dense_total), jd_scores
 
 
 def encode_texts(model: SentenceTransformer, texts: list[str], batch_size: int) -> np.ndarray:
@@ -1301,7 +1396,7 @@ def write_retrieval_outputs(
 ) -> None:
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        active_sections = section_names()
+        active_sections = jd_section_names()
         writer.writerow(
             [
                 "candidate_id",
@@ -1310,7 +1405,7 @@ def write_retrieval_outputs(
                 "dense_score",
                 "bm25_score",
             ]
-            + [f"{section}_score" for section in active_sections]
+            + [f"dense_{section}" for section in active_sections]
         )
         for rank, result in enumerate(results, start=1):
             writer.writerow(

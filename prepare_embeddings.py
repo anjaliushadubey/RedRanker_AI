@@ -41,6 +41,7 @@ from src.config import (
     EMBEDDING_BATCH_SIZE,
     EMBEDDING_MAX_SEQ_LENGTH,
     EMBEDDING_MODEL_NAME,
+    JD_SECTION_WEIGHTS,
     SECTION_EMBEDDING_MAX_SEQ_LENGTHS,
 )
 from src.data_loader import load_candidates
@@ -180,6 +181,10 @@ def main() -> None:
     print(
         "Section max seq lengths: "
         + ", ".join(f"{section}={length}" for section, length in SECTION_EMBEDDING_MAX_SEQ_LENGTHS.items())
+    )
+    print(
+        "JD dense query sections: "
+        + ", ".join(f"{section}={weight:.0%}" for section, weight in JD_SECTION_WEIGHTS.items())
     )
     print(f"TOKENIZERS_PARALLELISM: {os.environ.get('TOKENIZERS_PARALLELISM')}")
     print(f"Torch CPU threads: {CPU_THREADS if CPU_THREADS is not None else 'not configured'}")

@@ -19,7 +19,8 @@ from src.config import (
     DEFAULT_TOP_2000_CSV_PATH,
     DEFAULT_TOP_2000_JSONL_PATH,
     QDRANT_COLLECTION_NAME,
-    RETRIEVAL_SECTION_WEIGHTS,
+    JD_SECTION_WEIGHTS,
+    JD_TO_CANDIDATE_SECTION_WEIGHTS,
     TOP_2000_N,
 )
 from src.data_loader import load_candidates
@@ -81,9 +82,13 @@ def build_top_2000(
     print(f"Qdrant collection: {qdrant_collection}")
     print(f"Dense backend: {dense_backend}")
     weights_text = ", ".join(
-        f"{section} {weight:.0%}" for section, weight in RETRIEVAL_SECTION_WEIGHTS.items()
+        f"{section} {weight:.0%}" for section, weight in JD_SECTION_WEIGHTS.items()
     )
-    print(f"Dense section weights: {weights_text}")
+    print(f"JD dense section weights: {weights_text}")
+    print("JD to candidate section mapping:")
+    for jd_section, mapping in JD_TO_CANDIDATE_SECTION_WEIGHTS.items():
+        mapped_text = ", ".join(f"{section} {weight:.0%}" for section, weight in mapping.items())
+        print(f"  {jd_section}: {mapped_text}")
     print("Hybrid weights: dense 80%, BM25 20%")
     print(f"Elapsed seconds: {time.perf_counter() - started_at:.2f}")
 
@@ -115,7 +120,7 @@ def main() -> None:
         "--dense-backend",
         choices=["numpy", "qdrant"],
         default=DEFAULT_DENSE_BACKEND,
-        help="Use exact NumPy matrix similarity by default; Qdrant is available for experiments.",
+        help="Use Qdrant persistent named-vector storage by default; NumPy remains available as a fallback.",
     )
     args = parser.parse_args()
     embedding_cache_dir = resolve_cli_embedding_cache_dir(args.embedding_cache_dir, args.embedding_cache)

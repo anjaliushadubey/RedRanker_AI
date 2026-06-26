@@ -55,12 +55,12 @@ python prepare_embeddings.py --eligible-input .\eligible_candidates.jsonl --embe
 Then run the cached top-2000 ranker:
 
 ```powershell
-python top2000.py --eligible-input .\eligible_candidates.jsonl --csv-out .\top_2000_candidates.csv --jsonl-out .\top_2000_candidates.jsonl --top 2000 --dense-backend numpy --embedding-cache-dir . --query-cache .\query_embeddings.npz --bm25-cache .\bm25_scores.npz
+python top2000.py --eligible-input .\eligible_candidates.jsonl --csv-out .\top_2000_candidates.csv --jsonl-out .\top_2000_candidates.jsonl --top 2000 --dense-backend qdrant --embedding-cache-dir . --query-cache .\query_embeddings.npz --bm25-cache .\bm25_scores.npz --qdrant-path .\qdrant_storage
 ```
 
-`prepare_embeddings.py` builds dense embedding sections for title, summary, career history, and skills for every candidate that survives hard rejection. Education is not embedded as a separate dense section; it remains in the BM25 sparse text so exact matching can still use it. Dense section clipping is title 200 chars, summary 900 chars, career 1600 chars, and skills 900 chars. It uses section-specific max sequence lengths: title 32, summary 128, career_history 160, and skills 96. It enables tokenizer parallelism, sets Torch CPU threads from available CPU cores, skips truly empty section texts with zero vectors, deduplicates non-empty section texts, sorts unique texts by length before encoding to reduce padding, and uses section-specific batch sizes: title 512, summary 256, career_history 128, and skills 256. It saves per-section candidate embedding caches plus JD query embeddings, and it also prepares the BM25 score cache.
+`prepare_embeddings.py` builds dense embedding sections for title, summary, career history, and skills for every candidate that survives hard rejection. Education is not embedded as a separate dense section; it remains in the BM25 sparse text so exact matching can still use it. Dense section clipping is title 200 chars, summary 900 chars, career 1600 chars, and skills 900 chars. It uses section-specific max sequence lengths: title 32, summary 128, career_history 160, and skills 96. It enables tokenizer parallelism, sets Torch CPU threads from available CPU cores, skips truly empty section texts with zero vectors, deduplicates non-empty section texts, sorts unique texts by length before encoding to reduce padding, and uses section-specific batch sizes: title 512, summary 256, career_history 128, and skills 256. It saves per-section candidate embedding caches, structured JD query embeddings, and the BM25 score cache.
 
-`top2000.py` does not create embeddings. It only loads `eligible_candidates.jsonl`, the four per-section embedding caches, `query_embeddings.npz`, and `bm25_scores.npz`; computes exact NumPy cosine similarity over the cached normalized embedding matrices; blends 70% dense score with 30% BM25; and writes `top_2000_candidates.csv` plus `top_2000_candidates.jsonl`.
+`top2000.py` does not create embeddings. It only loads `eligible_candidates.jsonl`, the four per-section embedding caches, `query_embeddings.npz`, and `bm25_scores.npz`; stores/reuses the section vectors in a persistent local Qdrant named-vector collection; blends the Qdrant dense score with BM25; and writes `top_2000_candidates.csv` plus `top_2000_candidates.jsonl`. The dense score uses structured JD query sections such as career evidence, ranking/retrieval, embedding/vector search, evaluation/relevance, production ML systems, recommendation/matching, skills/tools, and role title. Each JD section is mapped to the candidate sections where that evidence should realistically appear, so evaluation evidence is mostly checked against career history while tools can also use skills. If local Qdrant fails because of a file lock or storage issue, the code falls back to NumPy cosine similarity over the cached section embeddings so the run can still finish.
 
 The default prepare command expects the SentenceTransformer model to already be cached locally and will not make hidden network calls. On a fresh machine, run once with `--allow-model-download`:
 
@@ -68,17 +68,17 @@ The default prepare command expects the SentenceTransformer model to already be 
 python prepare_embeddings.py --candidates .\candidates.jsonl --eligible-out .\eligible_candidates.jsonl --embedding-cache-dir . --query-cache .\query_embeddings.npz --bm25-cache .\bm25_scores.npz --loader jsonl --allow-model-download
 ```
 
-This all-eligible embedding path keeps maximum recall because no eligible candidate is removed before dense reranking. On the local dataset, the full eligible set is 30,290 candidates.
+This all-eligible embedding path keeps maximum recall because no eligible candidate is removed before dense reranking. After the current hard-reject and honeypot filters, the local eligible set is 16,806 candidates.
 
-The first full run creates `title_embeddings.npz`, `summary_embeddings.npz`, `career_history_embeddings.npz`, `skills_embeddings.npz`, `query_embeddings.npz`, and `bm25_scores.npz`. Each section cache validates model name, max sequence length, ordered candidate ID hash, section name, section text hash, embedding dimension, candidate count, and text-builder version before reuse. The JD query embeddings are cached separately so repeated retrieval runs do not need to load SentenceTransformer just to embed the fixed JD query. BM25 scores are also cached with candidate-order and text-builder metadata.
+The first full run creates `title_embeddings.npz`, `summary_embeddings.npz`, `career_history_embeddings.npz`, `skills_embeddings.npz`, `query_embeddings.npz`, and `bm25_scores.npz`. Each section cache validates model name, max sequence length, ordered candidate ID hash, section name, section text hash, embedding dimension, candidate count, and text-builder version before reuse. The JD query embeddings are cached separately with JD-section metadata, mapping hashes, and query-builder version, so repeated retrieval runs do not need to load SentenceTransformer just to embed the fixed JD query. BM25 scores are also cached with candidate-order and text-builder metadata.
 
-Qdrant remains available for experiments:
+NumPy exact matrix search remains available as a fallback/debug backend:
 
 ```powershell
-python top2000.py --eligible-input .\eligible_candidates.jsonl --csv-out .\top_2000_candidates.csv --jsonl-out .\top_2000_candidates.jsonl --top 2000 --dense-backend qdrant --embedding-cache-dir . --query-cache .\query_embeddings.npz --bm25-cache .\bm25_scores.npz --qdrant-path .\qdrant_storage
+python top2000.py --eligible-input .\eligible_candidates.jsonl --csv-out .\top_2000_candidates.csv --jsonl-out .\top_2000_candidates.jsonl --top 2000 --dense-backend numpy --embedding-cache-dir . --query-cache .\query_embeddings.npz --bm25-cache .\bm25_scores.npz
 ```
 
-When `--dense-backend qdrant` is used, the Qdrant index is persistent and metadata-guarded. If the Qdrant collection exists and its metadata matches the same candidate ID hash, model, section config, and embedding dimension, the retrieval stage reuses it instead of rebuilding the index. If local Qdrant fails because of a file lock or storage issue, the code falls back to NumPy cosine similarity over the cached section embeddings, then continues with the same 70/30 dense/BM25 blend.
+When `--dense-backend qdrant` is used, the Qdrant index is persistent and metadata-guarded. If the Qdrant collection exists and its metadata matches the same candidate ID hash, model, section config, and embedding dimension, the retrieval stage reuses it instead of rebuilding the index.
 
 ## Included Files
 

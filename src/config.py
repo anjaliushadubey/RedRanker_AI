@@ -23,8 +23,8 @@ TOP_N = 100
 TOP_2000_N = 2000
 PANDAS_CHUNK_SIZE = 50000
 DEFAULT_LOADER = "jsonl"
-DEFAULT_DENSE_BACKEND = "numpy"
-EMBEDDING_MODEL_NAME = "sentence-transformers/paraphrase-MiniLM-L3-v2"
+DEFAULT_DENSE_BACKEND = "qdrant"
+EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 EMBEDDING_BATCH_SIZE = 64
 EMBEDDING_MAX_SEQ_LENGTH = 160
 EMBEDDING_LOCAL_FILES_ONLY = True
@@ -45,6 +45,73 @@ RETRIEVAL_SECTION_WEIGHTS = {
     "summary": 0.15,
     "career_history": 0.60,
     "skills": 0.15,
+}
+
+JD_QUERY_BUILDER_VERSION = "jd_sections_v1"
+
+JD_SECTION_WEIGHTS = {
+    "career_evidence": 0.22,
+    "ranking_retrieval": 0.20,
+    "embedding_vector_search": 0.16,
+    "evaluation_relevance": 0.14,
+    "production_ml_systems": 0.12,
+    "recommendation_matching": 0.08,
+    "skills_tools": 0.05,
+    "role_title": 0.03,
+}
+
+JD_TO_CANDIDATE_SECTION_WEIGHTS = {
+    "role_title": {
+        "title": 0.70,
+        "summary": 0.20,
+        "career_history": 0.10,
+    },
+    "career_evidence": {
+        "career_history": 0.75,
+        "summary": 0.15,
+        "skills": 0.10,
+    },
+    "ranking_retrieval": {
+        "career_history": 0.70,
+        "skills": 0.20,
+        "summary": 0.10,
+    },
+    "embedding_vector_search": {
+        "career_history": 0.60,
+        "skills": 0.25,
+        "summary": 0.15,
+    },
+    "evaluation_relevance": {
+        "career_history": 0.80,
+        "summary": 0.15,
+        "skills": 0.05,
+    },
+    "production_ml_systems": {
+        "career_history": 0.70,
+        "summary": 0.20,
+        "skills": 0.10,
+    },
+    "recommendation_matching": {
+        "career_history": 0.70,
+        "summary": 0.15,
+        "skills": 0.15,
+    },
+    "skills_tools": {
+        "skills": 0.60,
+        "career_history": 0.30,
+        "summary": 0.10,
+    },
+}
+
+JD_SECTION_MAX_SEQ_LENGTHS = {
+    "role_title": 48,
+    "career_evidence": 160,
+    "ranking_retrieval": 160,
+    "embedding_vector_search": 128,
+    "evaluation_relevance": 128,
+    "production_ml_systems": 128,
+    "recommendation_matching": 96,
+    "skills_tools": 128,
 }
 
 RETRIEVAL_SECTION_MAX_CHARS = {
@@ -72,31 +139,45 @@ HYBRID_DENSE_WEIGHT = 0.80
 HYBRID_BM25_WEIGHT = 0.20
 
 JD_SECTION_QUERIES = {
-    "title": (
-        "Senior AI Engineer search engineer recommendation systems engineer "
-        "machine learning engineer applied ML engineer NLP engineer ranking engineer"
+    "role_title": (
+        "Senior AI Engineer applied ML engineer search engineer retrieval engineer "
+        "ranking engineer recommendation systems engineer senior data scientist "
+        "hands-on individual contributor."
     ),
-    "summary": (
-        "Own the intelligence layer for candidate job matching. Strong product "
-        "engineering mindset, async written communication, fast iteration, "
-        "production ML, retrieval ranking recommendation systems, evaluation, "
-        "shipper mindset."
+    "career_evidence": (
+        "Career history shows shipped end-to-end search ranking retrieval matching "
+        "recommendation or production ML systems for real users at product scale. "
+        "Built, implemented, deployed, optimized, or evaluated working systems."
     ),
-    "career_history": (
-        "Shipped end-to-end ranking search recommendation retrieval or matching "
-        "systems to real users at meaningful scale. Built production ML services, "
-        "hybrid retrieval, dense retrieval, BM25, vector search, reranking, A/B "
-        "testing, NDCG, MRR, MAP, feedback loops, monitoring, latency."
+    "ranking_retrieval": (
+        "Ranking system learning to rank ranker search ranking search relevance "
+        "retrieval system information retrieval BM25 Elasticsearch OpenSearch Solr "
+        "candidate search job search relevance scoring reranking."
     ),
-    "skills": (
-        "Python machine learning NLP information retrieval ranking search "
-        "recommendation systems embeddings vector search semantic search BM25 "
-        "FAISS Elasticsearch OpenSearch Qdrant Pinecone MLOps evaluation LLM "
-        "reranking RAG fine-tuning prompt engineering."
+    "embedding_vector_search": (
+        "Embeddings semantic search vector search dense retrieval sparse retrieval "
+        "hybrid retrieval hybrid search FAISS Qdrant Pinecone Milvus Weaviate "
+        "sentence transformers cross encoder bi encoder LLM reranking RAG retrieval."
     ),
-    "education": (
-        "Computer science machine learning artificial intelligence information "
-        "retrieval data science software engineering mathematics statistics."
+    "evaluation_relevance": (
+        "Ranking evaluation relevance labels human judgments click-through data "
+        "offline evaluation online evaluation A/B testing NDCG MRR MAP precision@k "
+        "recall@k feedback loop recruiter engagement metrics."
+    ),
+    "production_ml_systems": (
+        "Production ML deployed ML model serving ML pipeline feature pipeline Python "
+        "backend FastAPI API latency monitoring scale index refresh data pipeline "
+        "observability real users shipped launched."
+    ),
+    "recommendation_matching": (
+        "Recommendation system recommender system personalization candidate matching "
+        "job matching marketplace matching matching algorithm ranking candidates "
+        "matching jobs to candidates."
+    ),
+    "skills_tools": (
+        "Python machine learning NLP information retrieval embeddings vector search "
+        "semantic search BM25 FAISS Elasticsearch OpenSearch Qdrant Pinecone MLOps "
+        "evaluation LLM reranking recommendation systems."
     ),
 }
 
