@@ -485,6 +485,7 @@ class RerankResult:
     seniority_alignment_reason_codes: list[str]
     primary_differentiator: str
     reasoning: str
+    debug_flags: dict[str, object]
     row: dict
 
 
@@ -641,6 +642,7 @@ def career_sentences(candidate: dict) -> list[str]:
 @dataclass
 class EvidenceRealismIndex:
     description_counts: Counter[str]
+    fingerprint_candidate_counts: Counter[str]
     sentence_counts: Counter[str]
     sentence_companies: dict[str, set[str]]
 
@@ -650,6 +652,21 @@ def normalize_evidence_text(value: object) -> str:
     text = text.replace("\u2014", "-").replace("\u2013", "-")
     text = re.sub(r"\s+", " ", text)
     return text.strip(" .;,")
+
+
+def career_description_fingerprint(description: object, company: object = "") -> str:
+    text = normalize(description)
+    company_tokens = {
+        token for token in re.findall(r"[a-z0-9]+", normalize(company))
+        if len(token) > 2
+    }
+    text = re.sub(r"\b\d+(?:\.\d+)?\b", " ", text)
+    text = re.sub(r"[^a-z0-9+#@]+", " ", text)
+    tokens = [
+        token for token in text.split()
+        if token not in company_tokens and len(token) > 1
+    ]
+    return " ".join(tokens[:32])
 
 
 def career_description_records(candidate: dict) -> list[dict[str, object]]:
@@ -665,21 +682,28 @@ def career_description_records(candidate: dict) -> list[dict[str, object]]:
             "company": str(job.get("company") or ""),
             "industry": str(job.get("industry") or ""),
             "duration_months": int(float(job.get("duration_months") or 0)),
+            "fingerprint": career_description_fingerprint(description, job.get("company")),
         })
     return records
 
 
 def build_evidence_realism_index(rows: list[dict]) -> EvidenceRealismIndex:
     description_counts: Counter[str] = Counter()
+    fingerprint_candidate_counts: Counter[str] = Counter()
     sentence_counts: Counter[str] = Counter()
     sentence_companies: dict[str, set[str]] = defaultdict(set)
+    fingerprint_candidates: dict[str, set[str]] = defaultdict(set)
 
     for row in rows:
         candidate = row["candidate"]
+        candidate_id = str(candidate.get("candidate_id") or row.get("candidate_id") or "")
         for record in career_description_records(candidate):
             description = str(record["normalized"])
             if len(description) >= 120 and has_any(description, ALL_CAREER_REASON_TERMS):
                 description_counts[description] += 1
+            fingerprint = str(record.get("fingerprint") or "")
+            if len(fingerprint) >= 80 and has_any(fingerprint, ALL_CAREER_REASON_TERMS):
+                fingerprint_candidates[fingerprint].add(candidate_id)
         for job in candidate.get("career_history", []):
             company = str(job.get("company") or "")
             text = " ".join(
@@ -697,8 +721,12 @@ def build_evidence_realism_index(rows: list[dict]) -> EvidenceRealismIndex:
                 if company:
                     sentence_companies[normalized].add(company.lower())
 
+    for fingerprint, candidate_ids in fingerprint_candidates.items():
+        fingerprint_candidate_counts[fingerprint] = len(candidate_ids)
+
     return EvidenceRealismIndex(
         description_counts=description_counts,
+        fingerprint_candidate_counts=fingerprint_candidate_counts,
         sentence_counts=sentence_counts,
         sentence_companies=sentence_companies,
     )
@@ -756,37 +784,152 @@ def has_domain_mismatch(candidate: dict) -> bool:
     return False
 
 
+def salary_range_inverted(candidate: dict) -> bool:
+    salary = signals(candidate).get("expected_salary_range_inr_lpa") or {}
+    if not isinstance(salary, dict):
+        return False
+    try:
+        minimum = float(salary.get("min"))
+        maximum = float(salary.get("max"))
+    except (TypeError, ValueError):
+        return False
+    return minimum > maximum
+
+
+def weak_hireability_signal_count(candidate: dict) -> int:
+    s = signals(candidate)
+    notice = float(s.get("notice_period_days") if s.get("notice_period_days") is not None else 0.0)
+    response_rate = float(s.get("recruiter_response_rate") if s.get("recruiter_response_rate") is not None else 1.0)
+    response_hours = float(s.get("avg_response_time_hours") if s.get("avg_response_time_hours") is not None else 0.0)
+    verified_email = bool(s.get("verified_email"))
+    github_activity = float(s.get("github_activity_score") if s.get("github_activity_score") is not None else 0.0)
+    open_to_work = bool(s.get("open_to_work_flag"))
+    weak_signals = [
+        notice >= 90,
+        response_rate < 0.60,
+        response_hours > 48,
+        not verified_email,
+        github_activity == -1,
+        not open_to_work,
+    ]
+    return sum(1 for item in weak_signals if item)
+
+
+def weak_hireability_cluster_penalty(count: int) -> float:
+    if count >= 4:
+        return 0.055
+    if count == 3:
+        return 0.035
+    if count == 2:
+        return 0.015
+    return 0.0
+
+
+def repeated_template_stats(
+    candidate: dict,
+    index: EvidenceRealismIndex | None,
+    records: list[dict[str, object]] | None = None,
+) -> tuple[float, int, bool, list[str]]:
+    if index is None:
+        return 0.0, 0, False, []
+
+    penalty = 0.0
+    max_repeated_count = 0
+    reason_codes: list[str] = []
+    if records is None:
+        records = career_description_records(candidate)
+    fingerprints = [
+        str(record.get("fingerprint") or "")
+        for record in records
+    ]
+    fingerprint_counts = Counter(fp for fp in fingerprints if fp)
+
+    same_candidate_repeated = any(
+        own_count > 1 and len(fingerprint) >= 80 and has_any(fingerprint, ALL_CAREER_REASON_TERMS)
+        for fingerprint, own_count in fingerprint_counts.items()
+    )
+    if same_candidate_repeated:
+        penalty += 0.02
+        reason_codes.append("same_candidate_repeated_role_template")
+
+    repeated_penalty = 0.0
+    for fingerprint in fingerprint_counts:
+        if len(fingerprint) < 80 or not has_any(fingerprint, ALL_CAREER_REASON_TERMS):
+            continue
+        corpus_count = index.fingerprint_candidate_counts.get(fingerprint, 0)
+        max_repeated_count = max(max_repeated_count, corpus_count)
+        if 2 <= corpus_count <= 3:
+            repeated_penalty += 0.01
+        elif 4 <= corpus_count <= 8:
+            repeated_penalty += 0.025
+        elif corpus_count > 8:
+            repeated_penalty += 0.04
+    repeated_penalty = min(0.05, repeated_penalty)
+    if repeated_penalty:
+        penalty += repeated_penalty
+        reason_codes.append("repeated_career_template")
+
+    return penalty, max_repeated_count, same_candidate_repeated, reason_codes
+
+
 def evidence_realism_penalty(
     candidate: dict,
-    index: EvidenceRealismIndex,
+    global_template_stats: EvidenceRealismIndex | None = None,
     strong_technical: bool = False,
+    weak_hireability_count: int | None = None,
+    records: list[dict[str, object]] | None = None,
+    repeated_template_details: tuple[float, int, bool, list[str]] | None = None,
 ) -> tuple[float, list[str]]:
     penalty = 0.0
     reason_codes: list[str] = []
-    description_counts = Counter(str(record["normalized"]) for record in career_description_records(candidate))
+    index = global_template_stats
+    weak_count = weak_hireability_count
+    if weak_count is None:
+        weak_count = weak_hireability_signal_count(candidate)
 
-    for description, own_count in description_counts.items():
-        corpus_count = index.description_counts.get(description, 0)
-        if own_count > 1:
-            penalty += 0.035
-            reason_codes.append("duplicate_description_within_candidate")
-        if corpus_count >= 3 and has_any(description, ALL_CAREER_REASON_TERMS):
-            penalty += 0.018 + min(0.025, 0.004 * (corpus_count - 3))
-            reason_codes.append("repeated_career_description_across_candidates")
+    if salary_range_inverted(candidate):
+        penalty += 0.04 if weak_count >= 3 else 0.025
+        reason_codes.append("salary_range_inverted")
+
+    cluster_penalty = weak_hireability_cluster_penalty(weak_count)
+    if cluster_penalty:
+        penalty += cluster_penalty
+        reason_codes.append("weak_hireability_cluster")
+
+    if records is None:
+        records = career_description_records(candidate)
+    if repeated_template_details is None:
+        repeated_template_details = repeated_template_stats(candidate, index, records=records)
+    repeated_penalty, _, _, repeated_reasons = repeated_template_details
+    penalty += repeated_penalty
+    reason_codes.extend(repeated_reasons)
+
+    description_counts = Counter(str(record["normalized"]) for record in records)
+
+    if index is not None:
+        for description, own_count in description_counts.items():
+            corpus_count = index.description_counts.get(description, 0)
+            if own_count > 1:
+                penalty += 0.02
+                reason_codes.append("same_candidate_repeated_role_template")
+            if corpus_count >= 3 and has_any(description, ALL_CAREER_REASON_TERMS):
+                penalty += 0.01 + min(0.02, 0.003 * (corpus_count - 3))
+                reason_codes.append("repeated_career_template")
 
     repeated_sentence_hits = 0
-    for sentence in career_sentences(candidate):
-        normalized = normalize_evidence_text(sentence)
-        if len(normalized) < 70 or not has_any(normalized, ALL_CAREER_REASON_TERMS):
-            continue
-        corpus_count = index.sentence_counts.get(normalized, 0)
-        company_count = len(index.sentence_companies.get(normalized, set()))
-        if corpus_count >= 4 and company_count >= 3:
-            repeated_sentence_hits += 1
+    if index is not None:
+        for sentence in career_sentences(candidate):
+            normalized = normalize_evidence_text(sentence)
+            if len(normalized) < 70 or not has_any(normalized, ALL_CAREER_REASON_TERMS):
+                continue
+            corpus_count = index.sentence_counts.get(normalized, 0)
+            company_count = len(index.sentence_companies.get(normalized, set()))
+            if corpus_count >= 4 and company_count >= 3:
+                repeated_sentence_hits += 1
 
     if repeated_sentence_hits:
         penalty += min(0.04, 0.012 * repeated_sentence_hits)
-        reason_codes.append("repeated_template_evidence_sentences")
+        reason_codes.append("repeated_career_template")
 
     if has_duration_contradiction(candidate):
         penalty += 0.04
@@ -808,13 +951,30 @@ def evidence_realism_penalty(
 
     hard_realism_issue = any(
         code in reason_codes
-        for code in ["project_duration_exceeds_role_duration", "duplicate_description_within_candidate"]
+        for code in [
+            "project_duration_exceeds_role_duration",
+            "salary_range_inverted",
+            "weak_hireability_cluster",
+        ]
     )
-    if strong_technical and unique_support >= 2 and not hard_realism_issue:
+    profile_consistency_only = all(
+        code in {
+            "repeated_career_template",
+            "same_candidate_repeated_role_template",
+            "company_domain_description_mismatch",
+        }
+        for code in reason_codes
+    )
+    has_same_candidate_template = "same_candidate_repeated_role_template" in reason_codes
+    if strong_technical and unique_support >= 2 and profile_consistency_only and has_same_candidate_template:
+        cap = 0.04
+    elif strong_technical and unique_support >= 2 and profile_consistency_only:
         cap = 0.02
+    elif strong_technical and unique_support >= 2 and not hard_realism_issue:
+        cap = 0.04
     else:
-        cap = 0.08 if strong_technical else 0.12
-    return min(penalty, cap), unique_ordered(reason_codes, 8)
+        cap = 0.10 if strong_technical else 0.12
+    return min(penalty, cap), unique_ordered(reason_codes, 10)
 
 
 def same_sentence_evidence(candidate: dict, terms: list[str], verbs: list[str]) -> tuple[str, list[str]] | None:
@@ -1747,6 +1907,46 @@ def hireability_tradeoff_note(result: RerankResult) -> str:
     ])
 
 
+def realism_tradeoff_note(result: RerankResult) -> str:
+    if result.evidence_realism_penalty < 0.04 and result.seniority_drift_penalty < 0.04:
+        return ""
+    candidate = result.row["candidate"]
+    codes = set(result.evidence_realism_reason_codes + result.seniority_alignment_reason_codes)
+    if "recent_leadership_heavy" in codes or "recent_leadership_ownership_with_weak_hands_on" in codes:
+        return phrase_variant(candidate, "realism-leadership", [
+            "Recent role wording leans leadership-heavy.",
+            "Recent ownership language is less hands-on.",
+            "Recent role evidence is less IC-clean.",
+        ])
+    if "tech_lead_aspiration_soft_risk" in codes or "tech_lead_or_architecture_drift_without_recent_hands_on" in codes:
+        return phrase_variant(candidate, "realism-techlead", [
+            "Senior-IC alignment is slightly less clean.",
+            "Tech-lead direction is a small caveat.",
+            "Recent direction is less purely IC.",
+        ])
+    if "weak_hireability_cluster" in codes:
+        return phrase_variant(candidate, "realism-hire-cluster", [
+            "Hireability signals are less clean.",
+            "Engagement and availability are weaker.",
+            "Practical outreach signals are less clean.",
+        ])
+    if any(
+        code in codes
+        for code in [
+            "salary_range_inverted",
+            "repeated_career_template",
+            "same_candidate_repeated_role_template",
+            "company_domain_description_mismatch",
+        ]
+    ):
+        return phrase_variant(candidate, "realism-profile-consistency", [
+            "Profile consistency is a minor caveat.",
+            "Profile consistency is less clean.",
+            "Some profile consistency signals are weaker.",
+        ])
+    return ""
+
+
 def append_reasoning_note(reasoning: str, note: str, max_words: int = 38) -> str:
     if not note:
         return reasoning
@@ -2001,15 +2201,18 @@ def build_ranked_reasoning(result: RerankResult, rank: int) -> str:
     tier = rank_tier(rank)
     caveat = rank_reason_caveat(result, diffs, rank)
     hireability_tradeoff = hireability_tradeoff_note(result)
+    realism_tradeoff = realism_tradeoff_note(result)
     hireability = exceptional_hireability_note(candidate)
 
     reasoning = top_evidence_sentence(candidate, diffs)
     if hireability_tradeoff and (rank <= 60 or result.hireability_penalty >= 0.07):
         reasoning = append_reasoning_note(reasoning, hireability_tradeoff)
+    elif realism_tradeoff and (rank <= 60 or result.evidence_realism_penalty >= 0.05 or result.seniority_drift_penalty >= 0.04):
+        reasoning = append_reasoning_note(reasoning, realism_tradeoff)
     elif tier in {"solid", "cutoff"} and caveat:
         reasoning = f"{reasoning.rstrip('.;')} ; {caveat}."
 
-    if not hireability_tradeoff and hireability and rank <= 40 and word_count(reasoning) <= 32:
+    if not hireability_tradeoff and hireability and rank <= 40 and word_count(reasoning) <= 25:
         reasoning = f"{reasoning} {hireability}"
 
     reasoning = re.sub(r"\s+", " ", reasoning).replace(" ,", ",").replace(" ;", ";").strip()
@@ -2041,13 +2244,13 @@ def opening_for(profile_type: str, candidate: dict) -> str:
         "search_retrieval_specialist": [
             "Excellent retrieval fit",
             "Search/retrieval depth stands out",
-            "Retrieval-system evidence is strong",
+            "Retrieval-system evidence looks strong",
             "Search stack fit is clear",
             "Semantic-search experience is relevant",
             "Hybrid retrieval background matches",
-            "Information-retrieval profile is strong",
+            "Information-retrieval profile looks strong",
             "Search relevance evidence stands out",
-            "Retrieval implementation signal is strong",
+            "Retrieval implementation signal is convincing",
             "Dense/sparse search exposure is relevant",
             "Search engineering evidence is convincing",
             "Retrieval-heavy profile fits the mandate",
@@ -2055,12 +2258,12 @@ def opening_for(profile_type: str, candidate: dict) -> str:
         "ranking_ltr_engineer": [
             "Strong ranking candidate",
             "Ranking-system ownership stands out",
-            "Learning-to-rank evidence is strong",
+            "Learning-to-rank evidence looks strong",
             "Relevance-evaluation depth is useful",
             "Ranking layer experience fits well",
             "Search-ranking background is compelling",
             "Evaluation-backed ranking work is visible",
-            "Relevance workflow experience is strong",
+            "Relevance workflow experience looks strong",
             "Ranking and labeling evidence matches",
             "LTR-style profile fits the role",
             "Ranking improvement signal is clear",
@@ -2074,7 +2277,7 @@ def opening_for(profile_type: str, candidate: dict) -> str:
             "Candidate-matching relevance is clear",
             "Recommendation ownership stands out",
             "Marketplace matching signal is useful",
-            "Recommender-system profile is strong",
+            "Recommender-system profile looks strong",
             "Matching product experience fits",
             "Recommendation depth supports the rank",
             "Matching/ranking adjacency is valuable",
@@ -2086,12 +2289,12 @@ def opening_for(profile_type: str, candidate: dict) -> str:
             "Production engineering depth helps",
             "ML serving experience is relevant",
             "Feature-pipeline background is useful",
-            "Backend ML signal is strong",
+            "Backend ML signal is convincing",
             "Operational ML experience fits",
             "Production deployment evidence matters",
             "ML platform depth supports the rank",
             "Systems-minded ML profile fits",
-            "Production-readiness signal is strong",
+            "Production-readiness signal is convincing",
             "Applied ML implementation depth shows",
         ],
         "nlp_llm_engineer": [
@@ -2105,7 +2308,7 @@ def opening_for(profile_type: str, candidate: dict) -> str:
             "Retrieval-oriented NLP work stands out",
             "NLP-plus-search evidence is useful",
             "Language-model systems exposure helps",
-            "NLP engineering signal is strong",
+            "NLP engineering signal is convincing",
             "Embedding workflow experience fits",
         ],
         "adjacent_data_infra_candidate": [
@@ -2127,7 +2330,7 @@ def opening_for(profile_type: str, candidate: dict) -> str:
             "Senior builder profile fits",
             "Implementation depth stands out",
             "Hands-on ownership is visible",
-            "Senior applied-ML profile is strong",
+            "Senior applied-ML profile looks strong",
             "Builder-oriented senior profile fits",
             "Practical system-building evidence helps",
             "Senior execution signal is clear",
@@ -2504,7 +2707,11 @@ SENIORITY_DRIFT_TERMS = [
     "tech lead roles",
     "tech-lead role",
     "tech lead role",
-    "architecture",
+    "architecture role",
+    "architecture roles",
+    "architecture track",
+    "moved into architecture",
+    "architecture/tech lead",
     "architectural roadmap",
     "roadmap",
     "strategy",
@@ -2554,6 +2761,29 @@ CURRENT_ROLE_BUILDER_VERBS = [
     "migrated",
 ]
 
+RECENT_SYSTEM_CONTEXT_TERMS = (
+    RANKING_RETRIEVAL_TERMS
+    + RECOMMENDATION_MATCHING_TERMS
+    + EMBEDDING_VECTOR_TERMS
+    + EVALUATION_TERMS
+    + PRODUCTION_TERMS
+    + [
+        "ranking pipeline",
+        "search system",
+        "evaluation framework",
+        "feature pipeline",
+        "embedding pipeline",
+        "api",
+        "model serving",
+        "deployment",
+        "retrieval",
+        "search",
+        "ranking",
+        "pipeline",
+        "service",
+    ]
+)
+
 
 def recent_career_text(candidate: dict, months: int = 18) -> str:
     threshold = (REFERENCE_DATE.year * 12 + REFERENCE_DATE.month) - months
@@ -2571,6 +2801,38 @@ def recent_career_text(candidate: dict, months: int = 18) -> str:
                 for key in ["title", "industry", "description", "company"]
             )
     return normalize(" ".join(parts))
+
+
+def counted_recent_hands_on_verbs(text: str) -> list[str]:
+    verbs = []
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        normalized = normalize(sentence)
+        for verb in STRONG_RECENT_HANDS_ON_VERBS:
+            if verb == "designed":
+                if term_in_text(normalized, verb) and has_any(normalized, RECENT_SYSTEM_CONTEXT_TERMS):
+                    verbs.append(verb)
+                continue
+            if term_in_text(normalized, verb):
+                verbs.append(verb)
+    return verbs
+
+
+def recent_hands_on_score(candidate: dict) -> tuple[float, list[str]]:
+    recent = recent_career_text(candidate, months=18)
+    if not recent:
+        return 0.0, []
+    verbs = unique_ordered(counted_recent_hands_on_verbs(recent))
+    score = min(1.0, len(verbs) / 3.0)
+    reason_codes = ["recent_hands_on_evidence_present"] if score >= 0.34 else []
+    return score, reason_codes
+
+
+def recent_leadership_score(candidate: dict) -> float:
+    recent = recent_career_text(candidate, months=18)
+    if not recent:
+        return 0.0
+    hits = unique_ordered(match_terms(recent, RECENT_LEADERSHIP_OWNERSHIP_TERMS))
+    return min(1.0, len(hits) / 3.0)
 
 
 def current_or_latest_career_text(candidate: dict) -> str:
@@ -2604,7 +2866,8 @@ def has_recent_hands_on_production(candidate: dict) -> bool:
     recent = recent_career_text(candidate, months=18)
     if not recent:
         return False
-    has_hands_on = has_any(recent, HANDS_ON_VERBS)
+    hands_score, _ = recent_hands_on_score(candidate)
+    has_hands_on = hands_score > 0.0
     has_production_or_core = has_any(
         recent,
         PRODUCTION_TERMS
@@ -2620,7 +2883,8 @@ def has_recent_strong_hands_on_production(candidate: dict) -> bool:
     recent = recent_career_text(candidate, months=18)
     if not recent:
         return False
-    has_hands_on = has_any(recent, STRONG_RECENT_HANDS_ON_VERBS)
+    hands_score, _ = recent_hands_on_score(candidate)
+    has_hands_on = hands_score >= 0.66
     has_production_or_core = has_any(
         recent,
         PRODUCTION_TERMS
@@ -2668,8 +2932,9 @@ def seniority_alignment_adjustment(
     senior_ic_bonus = 0.0
     has_drift_language = has_any(profile_text, SENIORITY_DRIFT_TERMS)
     explicit_tech_lead_roles = has_any(profile_text, ["tech-lead roles", "tech lead roles"])
-    recent_text = recent_career_text(candidate, months=18)
-    recent_leadership = has_any(recent_text, RECENT_LEADERSHIP_OWNERSHIP_TERMS)
+    hands_score, hands_reason_codes = recent_hands_on_score(candidate)
+    leadership_score = recent_leadership_score(candidate)
+    recent_leadership = leadership_score >= 0.34
     recent_hands_on = has_recent_hands_on_production(candidate)
     recent_strong_hands_on = has_recent_strong_hands_on_production(candidate)
     current_builder_evidence = has_current_builder_evidence(candidate)
@@ -2678,21 +2943,26 @@ def seniority_alignment_adjustment(
 
     if recent_leadership:
         if recent_strong_hands_on:
-            penalty_options.append(0.030)
+            penalty_options.append(0.025)
             reason_codes.append("recent_leadership_with_hands_on_builder_evidence")
+            reason_codes.extend(hands_reason_codes)
+        elif hands_score >= 0.34:
+            penalty_options.append(0.010)
+            reason_codes.append("recent_leadership_heavy")
+            reason_codes.extend(hands_reason_codes)
         else:
-            penalty_options.append(0.060)
-            reason_codes.append("recent_leadership_ownership_with_weak_hands_on")
+            penalty_options.append(0.040)
+            reason_codes.append("recent_leadership_heavy")
 
     if has_drift_language:
         if explicit_tech_lead_roles:
             if current_builder_evidence:
                 reason_codes.append("tech_lead_aspiration_offset_by_current_builder_evidence")
             else:
-                penalty_options.append(0.020)
-                reason_codes.append("tech_lead_aspiration_without_current_builder_evidence")
+                penalty_options.append(0.050 if not recent_hands_on else 0.015)
+                reason_codes.append("tech_lead_aspiration_soft_risk")
         elif recent_hands_on:
-            penalty_options.append(0.020)
+            penalty_options.append(0.015)
             reason_codes.append("architecture_or_strategy_language_with_recent_hands_on")
         else:
             penalty_options.append(0.050)
@@ -2713,6 +2983,46 @@ def seniority_alignment_adjustment(
         reason_codes.append("explicit_senior_ic_hands_on_alignment")
 
     return drift_penalty, senior_ic_bonus, reason_codes
+
+
+def candidate_debug_flags(
+    candidate: dict,
+    realism_index: EvidenceRealismIndex | None,
+    nontechnical_penalty_total: float = 0.0,
+    weak_count: int | None = None,
+    repeated_template_details: tuple[float, int, bool, list[str]] | None = None,
+    hands_score: float | None = None,
+    leadership_score: float | None = None,
+) -> dict[str, object]:
+    if repeated_template_details is None:
+        repeated_template_details = repeated_template_stats(candidate, realism_index)
+    repeated_penalty, repeated_count, same_repeated, _ = repeated_template_details
+    if weak_count is None:
+        weak_count = weak_hireability_signal_count(candidate)
+    if hands_score is None:
+        hands_score, _ = recent_hands_on_score(candidate)
+    if leadership_score is None:
+        leadership_score = recent_leadership_score(candidate)
+    profile_text = normalize(
+        " ".join(
+            str(profile(candidate).get(key) or "")
+            for key in ["headline", "summary", "current_title"]
+        )
+    )
+    tech_lead_risk = has_any(profile_text, ["tech-lead roles", "tech lead roles", "architecture roles"])
+    return {
+        "salary_range_inverted": salary_range_inverted(candidate),
+        "weak_hireability_signal_count": weak_count,
+        "repeated_career_template_count": repeated_count,
+        "same_candidate_repeated_template": same_repeated,
+        "company_domain_description_mismatch": has_domain_mismatch(candidate),
+        "recent_hands_on_score": hands_score,
+        "recent_leadership_score": leadership_score,
+        "recent_leadership_heavy": leadership_score >= 0.67 and hands_score < 0.67,
+        "tech_lead_aspiration_soft_risk": tech_lead_risk,
+        "repeated_career_template_penalty": repeated_penalty,
+        "nontechnical_penalty_total": nontechnical_penalty_total,
+    }
 
 
 def rerank_row(row: dict, realism_index: EvidenceRealismIndex) -> RerankResult:
@@ -2747,24 +3057,43 @@ def rerank_row(row: dict, realism_index: EvidenceRealismIndex) -> RerankResult:
     primary = determine_primary_differentiator(candidate, components)
     strong_technical = strong_technical_candidate(career_score, pillar_score, primary)
     hireability_penalty, hireability_reason_codes = hireability_risk(candidate, strong_technical)
-    realism_penalty, realism_reason_codes = evidence_realism_penalty(candidate, realism_index, strong_technical)
+    weak_count = weak_hireability_signal_count(candidate)
+    description_records = career_description_records(candidate)
+    repeated_details = repeated_template_stats(candidate, realism_index, records=description_records)
+    realism_penalty, realism_reason_codes = evidence_realism_penalty(
+        candidate,
+        realism_index,
+        strong_technical,
+        weak_hireability_count=weak_count,
+        records=description_records,
+        repeated_template_details=repeated_details,
+    )
     seniority_drift_penalty, senior_ic_bonus, seniority_alignment_reason_codes = seniority_alignment_adjustment(
         candidate,
         strong_technical,
         hireability_penalty,
         realism_penalty,
     )
+    nontechnical_penalty_raw = hireability_penalty + realism_penalty + seniority_drift_penalty
+    nontechnical_penalty_cap = 0.18 if strong_technical else 0.30
+    nontechnical_penalty_total = min(nontechnical_penalty_raw, nontechnical_penalty_cap)
     final = clamp(
         (base * penalty_factor)
-        - hireability_penalty
-        - realism_penalty
-        - seniority_drift_penalty
+        - nontechnical_penalty_total
         + senior_ic_bonus
     )
     components["hireability_penalty"] = hireability_penalty
     components["evidence_realism_penalty"] = realism_penalty
     components["seniority_drift_penalty"] = seniority_drift_penalty
     components["senior_ic_alignment_bonus"] = senior_ic_bonus
+    components["nontechnical_penalty_total"] = nontechnical_penalty_total
+    debug_flags = candidate_debug_flags(
+        candidate,
+        realism_index,
+        nontechnical_penalty_total=nontechnical_penalty_total,
+        weak_count=weak_count,
+        repeated_template_details=repeated_details,
+    )
     return RerankResult(
         candidate_id=str(candidate["candidate_id"]),
         original_rank=int(row.get("rank") or 0),
@@ -2782,6 +3111,7 @@ def rerank_row(row: dict, realism_index: EvidenceRealismIndex) -> RerankResult:
         seniority_alignment_reason_codes=seniority_alignment_reason_codes,
         primary_differentiator=primary,
         reasoning=build_candidate_reasoning(candidate, components, reason_codes),
+        debug_flags=debug_flags,
         row=row,
     )
 
@@ -2874,11 +3204,21 @@ def write_debug(results: list[RerankResult], path: Path) -> None:
             "evidence_realism_penalty",
             "seniority_drift_penalty",
             "senior_ic_alignment_bonus",
+            "nontechnical_penalty_total",
             "penalties",
             "reason_codes",
             "hireability_reason_codes",
             "evidence_realism_reason_codes",
             "seniority_alignment_reason_codes",
+            "salary_range_inverted",
+            "weak_hireability_signal_count",
+            "repeated_career_template_count",
+            "same_candidate_repeated_template",
+            "company_domain_description_mismatch",
+            "recent_hands_on_score",
+            "recent_leadership_score",
+            "recent_leadership_heavy",
+            "tech_lead_aspiration_soft_risk",
             "notice_period_days",
             "open_to_work_flag",
             "recruiter_response_rate",
@@ -2903,11 +3243,21 @@ def write_debug(results: list[RerankResult], path: Path) -> None:
                 "evidence_realism_penalty": f"{result.evidence_realism_penalty:.6f}",
                 "seniority_drift_penalty": f"{result.seniority_drift_penalty:.6f}",
                 "senior_ic_alignment_bonus": f"{result.senior_ic_alignment_bonus:.6f}",
+                "nontechnical_penalty_total": f"{float(result.debug_flags.get('nontechnical_penalty_total', 0.0)):.6f}",
                 "penalties": ";".join(result.penalties),
                 "reason_codes": ";".join(result.reason_codes),
                 "hireability_reason_codes": ";".join(result.hireability_reason_codes),
                 "evidence_realism_reason_codes": ";".join(result.evidence_realism_reason_codes),
                 "seniority_alignment_reason_codes": ";".join(result.seniority_alignment_reason_codes),
+                "salary_range_inverted": result.debug_flags.get("salary_range_inverted", False),
+                "weak_hireability_signal_count": result.debug_flags.get("weak_hireability_signal_count", 0),
+                "repeated_career_template_count": result.debug_flags.get("repeated_career_template_count", 0),
+                "same_candidate_repeated_template": result.debug_flags.get("same_candidate_repeated_template", False),
+                "company_domain_description_mismatch": result.debug_flags.get("company_domain_description_mismatch", False),
+                "recent_hands_on_score": f"{float(result.debug_flags.get('recent_hands_on_score', 0.0)):.6f}",
+                "recent_leadership_score": f"{float(result.debug_flags.get('recent_leadership_score', 0.0)):.6f}",
+                "recent_leadership_heavy": result.debug_flags.get("recent_leadership_heavy", False),
+                "tech_lead_aspiration_soft_risk": result.debug_flags.get("tech_lead_aspiration_soft_risk", False),
                 "notice_period_days": s.get("notice_period_days", ""),
                 "open_to_work_flag": s.get("open_to_work_flag", ""),
                 "recruiter_response_rate": s.get("recruiter_response_rate", ""),
@@ -2938,6 +3288,15 @@ def validate_submission(results: list[RerankResult], rejected_ids: set[str]) -> 
             raise ValueError(f"Reasoning length outside 20-38 words for {result.candidate_id}: {words}")
     if any(math.isnan(result.final_score) for result in results):
         raise ValueError("NaN score in final top100")
+    for result in results:
+        penalty_values = [
+            result.hireability_penalty,
+            result.evidence_realism_penalty,
+            result.seniority_drift_penalty,
+            float(result.debug_flags.get("nontechnical_penalty_total", 0.0)),
+        ]
+        if any(math.isnan(value) for value in penalty_values):
+            raise ValueError(f"NaN penalty in final top100 for {result.candidate_id}")
     for previous, current in zip(results, results[1:]):
         if previous.final_score < current.final_score:
             raise ValueError("Scores are not sorted descending")
@@ -3028,6 +3387,28 @@ def validate_submission(results: list[RerankResult], rejected_ids: set[str]) -> 
             raise ValueError(f"Top50 candidate lacks career-history evidence in reasoning terms: {result.candidate_id}")
 
 
+def validate_debug_columns(path: Path) -> None:
+    required = {
+        "evidence_realism_penalty",
+        "evidence_realism_reason_codes",
+        "salary_range_inverted",
+        "weak_hireability_signal_count",
+        "repeated_career_template_count",
+        "same_candidate_repeated_template",
+        "company_domain_description_mismatch",
+        "recent_hands_on_score",
+        "recent_leadership_score",
+        "recent_leadership_heavy",
+        "tech_lead_aspiration_soft_risk",
+    }
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.reader(handle)
+        header = next(reader, [])
+    missing = sorted(required.difference(header))
+    if missing:
+        raise ValueError(f"Debug CSV missing required columns: {missing}")
+
+
 def rerank(
     top2000_path: Path,
     rejected_path: Path,
@@ -3052,6 +3433,7 @@ def rerank(
     write_submission(selected, submission_path)
     write_top100_jsonl(selected, top100_jsonl_path, candidates_path)
     write_debug(results, debug_path)
+    validate_debug_columns(debug_path)
     print(f"Loaded top2000 rows: {len(rows)}")
     print(f"Reranked candidates: {len(results)}")
     print(f"Wrote submission: {submission_path}")

@@ -261,10 +261,21 @@ def company_timeline_findings(candidate: dict) -> list[HoneypotFinding]:
         end = parse_date(job.get("end_date")) or REFERENCE_DATE
         if not start:
             continue
-        company_age_months = max(0, (end.year - founding_year) * 12 + end.month)
-        duration = int(job.get("duration_months") or 0)
-        if duration > company_age_months + 12:
-            findings.append(HoneypotFinding("role_duration_exceeds_possible_company_age", 5))
+        if start.year < founding_year:
+            findings.append(HoneypotFinding("role_start_before_company_founding", 5))
+            continue
+
+        company_age_months = max(0, ((end.year - founding_year) * 12) + end.month)
+        declared_duration = int(job.get("duration_months") or 0)
+        actual_duration = 0
+        if end >= start:
+            actual_duration = ((end.year - start.year) * 12) + (end.month - start.month) + 1
+
+        if declared_duration > company_age_months + 12:
+            findings.append(HoneypotFinding("role_duration_exceeds_company_age", 5))
+            continue
+        if actual_duration > company_age_months + 12:
+            findings.append(HoneypotFinding("role_dates_exceed_company_age", 5))
     return findings
 
 
