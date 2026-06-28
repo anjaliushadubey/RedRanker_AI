@@ -480,9 +480,21 @@ class RerankResult:
     hireability_reason_codes: list[str]
     evidence_realism_penalty: float
     evidence_realism_reason_codes: list[str]
+    career_template_penalty: float
+    career_template_reason_codes: list[str]
     seniority_drift_penalty: float
     senior_ic_alignment_bonus: float
     seniority_alignment_reason_codes: list[str]
+    top5_template_guardrail_penalty: float
+    top5_template_guardrail_reason: str
+    top5_guardrail_applied: bool
+    strong_unique_current_role_evidence: bool
+    unique_current_role_signal_count: int
+    final_calibration_penalty: float
+    final_calibration_reason_codes: list[str]
+    top10_not_open_guardrail_penalty: float
+    top10_not_open_guardrail_reason: str
+    top10_not_open_guardrail_applied: bool
     primary_differentiator: str
     reasoning: str
     debug_flags: dict[str, object]
@@ -643,8 +655,99 @@ def career_sentences(candidate: dict) -> list[str]:
 class EvidenceRealismIndex:
     description_counts: Counter[str]
     fingerprint_candidate_counts: Counter[str]
+    fingerprint_role_counts: Counter[str]
+    semantic_candidate_counts: Counter[str]
+    semantic_role_counts: Counter[str]
     sentence_counts: Counter[str]
     sentence_companies: dict[str, set[str]]
+
+
+TEMPLATE_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "by",
+    "for",
+    "from",
+    "in",
+    "into",
+    "it",
+    "of",
+    "on",
+    "or",
+    "our",
+    "the",
+    "their",
+    "this",
+    "to",
+    "with",
+}
+
+TEMPLATE_TOOL_PLACEHOLDERS = {
+    "faiss": "vector_index",
+    "hnsw": "ann_index",
+    "pinecone": "vector_db",
+    "qdrant": "vector_db",
+    "milvus": "vector_db",
+    "weaviate": "vector_db",
+    "elasticsearch": "keyword_search",
+    "opensearch": "keyword_search",
+    "solr": "keyword_search",
+    "bm25": "keyword_search",
+    "sentence-transformers": "embedding_model",
+    "sentence": "embedding_model",
+    "transformers": "embedding_model",
+    "bge": "embedding_model",
+    "openai": "llm_api",
+    "gpt": "llm_model",
+    "xgboost": "ltr_model",
+}
+
+TEMPLATE_SIGNAL_TERMS = {
+    "ranking",
+    "ranker",
+    "retrieval",
+    "search",
+    "semantic",
+    "vector",
+    "hybrid",
+    "recommendation",
+    "recommender",
+    "matching",
+    "personalization",
+    "learning",
+    "rank",
+    "relevance",
+    "labeling",
+    "judgments",
+    "click",
+    "feature",
+    "pipeline",
+    "embedding",
+    "reranker",
+    "chatbot",
+    "rag",
+    "support",
+    "content",
+    "candidate",
+    "job",
+    "latency",
+    "monitoring",
+    "index",
+    "refresh",
+    "rollback",
+    "versioning",
+    "evaluation",
+    "ndcg",
+    "mrr",
+    "map",
+    "qps",
+    "p95",
+    "engagement",
+}
 
 
 def normalize_evidence_text(value: object) -> str:
@@ -654,19 +757,40 @@ def normalize_evidence_text(value: object) -> str:
     return text.strip(" .;,")
 
 
-def career_description_fingerprint(description: object, company: object = "") -> str:
+def template_tokens(description: object, company: object = "") -> list[str]:
     text = normalize(description)
     company_tokens = {
         token for token in re.findall(r"[a-z0-9]+", normalize(company))
         if len(token) > 2
     }
+    text = re.sub(r"\b\d+(?:\.\d+)?\s?(?:k|m|million|lakh|crore|%|ms|qps)\b", " ", text)
     text = re.sub(r"\b\d+(?:\.\d+)?\b", " ", text)
     text = re.sub(r"[^a-z0-9+#@]+", " ", text)
-    tokens = [
-        token for token in text.split()
-        if token not in company_tokens and len(token) > 1
+    tokens: list[str] = []
+    for token in text.split():
+        if token in company_tokens or token in TEMPLATE_STOPWORDS or len(token) <= 1:
+            continue
+        tokens.append(TEMPLATE_TOOL_PLACEHOLDERS.get(token, token))
+    return tokens
+
+
+def exact_template_fingerprint(description: object, company: object = "") -> str:
+    return " ".join(template_tokens(description, company)[:45])
+
+
+def semantic_template_signature(description: object, company: object = "") -> str:
+    tokens = template_tokens(description, company)
+    signal_tokens = [
+        token for token in tokens
+        if token in TEMPLATE_SIGNAL_TERMS or token in set(TEMPLATE_TOOL_PLACEHOLDERS.values())
     ]
-    return " ".join(tokens[:32])
+    if len(signal_tokens) < 8:
+        signal_tokens = tokens[:35]
+    return " ".join(signal_tokens[:50])
+
+
+def career_description_fingerprint(description: object, company: object = "") -> str:
+    return exact_template_fingerprint(description, company)
 
 
 def career_description_records(candidate: dict) -> list[dict[str, object]]:
@@ -681,8 +805,14 @@ def career_description_records(candidate: dict) -> list[dict[str, object]]:
             "description": description,
             "company": str(job.get("company") or ""),
             "industry": str(job.get("industry") or ""),
+            "title": str(job.get("title") or ""),
+            "start_date": job.get("start_date"),
+            "end_date": job.get("end_date"),
+            "is_current": bool(job.get("is_current")),
             "duration_months": int(float(job.get("duration_months") or 0)),
             "fingerprint": career_description_fingerprint(description, job.get("company")),
+            "exact_template_fingerprint": exact_template_fingerprint(description, job.get("company")),
+            "semantic_template_signature": semantic_template_signature(description, job.get("company")),
         })
     return records
 
@@ -690,9 +820,13 @@ def career_description_records(candidate: dict) -> list[dict[str, object]]:
 def build_evidence_realism_index(rows: list[dict]) -> EvidenceRealismIndex:
     description_counts: Counter[str] = Counter()
     fingerprint_candidate_counts: Counter[str] = Counter()
+    fingerprint_role_counts: Counter[str] = Counter()
+    semantic_candidate_counts: Counter[str] = Counter()
+    semantic_role_counts: Counter[str] = Counter()
     sentence_counts: Counter[str] = Counter()
     sentence_companies: dict[str, set[str]] = defaultdict(set)
     fingerprint_candidates: dict[str, set[str]] = defaultdict(set)
+    semantic_candidates: dict[str, set[str]] = defaultdict(set)
 
     for row in rows:
         candidate = row["candidate"]
@@ -704,6 +838,11 @@ def build_evidence_realism_index(rows: list[dict]) -> EvidenceRealismIndex:
             fingerprint = str(record.get("fingerprint") or "")
             if len(fingerprint) >= 80 and has_any(fingerprint, ALL_CAREER_REASON_TERMS):
                 fingerprint_candidates[fingerprint].add(candidate_id)
+                fingerprint_role_counts[fingerprint] += 1
+            semantic = str(record.get("semantic_template_signature") or "")
+            if len(semantic) >= 60 and has_any(semantic, ALL_CAREER_REASON_TERMS):
+                semantic_candidates[semantic].add(candidate_id)
+                semantic_role_counts[semantic] += 1
         for job in candidate.get("career_history", []):
             company = str(job.get("company") or "")
             text = " ".join(
@@ -723,10 +862,15 @@ def build_evidence_realism_index(rows: list[dict]) -> EvidenceRealismIndex:
 
     for fingerprint, candidate_ids in fingerprint_candidates.items():
         fingerprint_candidate_counts[fingerprint] = len(candidate_ids)
+    for semantic, candidate_ids in semantic_candidates.items():
+        semantic_candidate_counts[semantic] = len(candidate_ids)
 
     return EvidenceRealismIndex(
         description_counts=description_counts,
         fingerprint_candidate_counts=fingerprint_candidate_counts,
+        fingerprint_role_counts=fingerprint_role_counts,
+        semantic_candidate_counts=semantic_candidate_counts,
+        semantic_role_counts=semantic_role_counts,
         sentence_counts=sentence_counts,
         sentence_companies=sentence_companies,
     )
@@ -825,51 +969,514 @@ def weak_hireability_cluster_penalty(count: int) -> float:
     return 0.0
 
 
+UNIQUE_ARCHITECTURE_TERMS = [
+    "bm25 + dense retrieval",
+    "bm25 and dense retrieval",
+    "dense retrieval",
+    "llm-based re-ranker",
+    "llm reranker",
+    "learning-to-rank model",
+    "faiss hnsw",
+    "bge-large",
+    "bge embeddings",
+    "pinecone retrieval",
+    "xgboost ltr",
+    "hybrid retrieval architecture",
+    "latency fallback",
+]
+
+UNIQUE_EVALUATION_TERMS = [
+    "ndcg",
+    "mrr",
+    "recall@k",
+    "precision@k",
+    "a/b engagement metrics",
+    "a/b testing",
+    "human relevance judgments",
+    "relevance labeling",
+    "online/offline evaluation",
+    "offline evaluation",
+    "online evaluation",
+]
+
+UNIQUE_OPERATIONAL_TERMS = [
+    "index versioning",
+    "embedding versioning",
+    "embedding drift monitoring",
+    "rollback paths",
+    "incremental index refresh",
+    "latency budget",
+    "p95",
+    "monitoring",
+    "dashboards",
+    "recruiter-feedback loop",
+    "feedback loop",
+]
+
+UNIQUE_DOMAIN_TERMS = [
+    "candidate-jd matching",
+    "candidate jd matching",
+    "candidate-role matching",
+    "candidate matching",
+    "job matching",
+    "recruiter-facing",
+    "recruiter engagement",
+    "time-to-shortlist",
+]
+
+UNIQUE_IMPACT_TERMS = [
+    "improved ndcg",
+    "reduced latency",
+    "improved recruiter engagement",
+    "recruiter engagement metrics",
+    "reduced the average time-to-shortlist",
+    "time-to-shortlist",
+    "revenue-per-search",
+    "search-relevance improvement",
+]
+
+
+def role_overlaps_recent(record: dict[str, object], months: int = 18) -> bool:
+    if bool(record.get("is_current")):
+        return True
+    threshold = (REFERENCE_DATE.year * 12 + REFERENCE_DATE.month) - months
+    end = parse_date(record.get("end_date")) or REFERENCE_DATE
+    return (end.year * 12 + end.month) >= threshold
+
+
+def unique_evidence_score(
+    candidate: dict,
+    records: list[dict[str, object]] | None = None,
+    global_template_stats: EvidenceRealismIndex | None = None,
+) -> tuple[float, list[str], bool]:
+    if records is None:
+        records = career_description_records(candidate)
+
+    usable_records: list[dict[str, object]] = []
+    for record in records:
+        if global_template_stats is not None:
+            exact = str(record.get("exact_template_fingerprint") or record.get("fingerprint") or "")
+            semantic = str(record.get("semantic_template_signature") or "")
+            candidate_count = max(
+                global_template_stats.fingerprint_candidate_counts.get(exact, 0),
+                global_template_stats.semantic_candidate_counts.get(semantic, 0),
+            )
+            if candidate_count >= 2 and has_any(exact + " " + semantic, ALL_CAREER_REASON_TERMS):
+                continue
+        usable_records.append(record)
+
+    if not usable_records:
+        return 0.0, [], False
+
+    all_text = normalize(
+        " ".join(str(record.get("description") or "") for record in usable_records)
+    )
+    recent_text = " ".join(
+        str(record.get("description") or "")
+        for record in usable_records
+        if role_overlaps_recent(record)
+    ).lower()
+    text = recent_text or all_text
+    reasons: list[str] = []
+
+    scale_patterns = [
+        r"\b(?:30|35|50)m\+?\b",
+        r"\b\d+(?:\.\d+)?m\+?\s+(?:queries|documents|items|users)\b",
+        r"\b8k\s*qps\b",
+        r"\bsub-?200ms\b",
+        r"\bp95\b",
+    ]
+    if any(re.search(pattern, text) for pattern in scale_patterns):
+        reasons.append("unique_scale")
+    if has_any(text, UNIQUE_ARCHITECTURE_TERMS):
+        reasons.append("specific_architecture")
+    if has_any(text, UNIQUE_EVALUATION_TERMS):
+        reasons.append("evaluation_depth")
+    if has_any(text, UNIQUE_OPERATIONAL_TERMS):
+        reasons.append("operational_detail")
+    if has_any(text, UNIQUE_DOMAIN_TERMS):
+        reasons.append("candidate_or_recruiter_domain")
+    if has_any(text, UNIQUE_IMPACT_TERMS) or re.search(r"\bimprov(?:ed|ement)\b.*\b\d+(?:\.\d+)?%", text):
+        reasons.append("concrete_impact")
+
+    if len(reasons) < 2 and recent_text:
+        fallback_reasons = []
+        if any(re.search(pattern, all_text) for pattern in scale_patterns):
+            fallback_reasons.append("unique_scale")
+        if has_any(all_text, UNIQUE_ARCHITECTURE_TERMS):
+            fallback_reasons.append("specific_architecture")
+        if has_any(all_text, UNIQUE_EVALUATION_TERMS):
+            fallback_reasons.append("evaluation_depth")
+        if has_any(all_text, UNIQUE_OPERATIONAL_TERMS):
+            fallback_reasons.append("operational_detail")
+        if has_any(all_text, UNIQUE_DOMAIN_TERMS):
+            fallback_reasons.append("candidate_or_recruiter_domain")
+        if has_any(all_text, UNIQUE_IMPACT_TERMS) or re.search(r"\bimprov(?:ed|ement)\b.*\b\d+(?:\.\d+)?%", all_text):
+            fallback_reasons.append("concrete_impact")
+        reasons = unique_ordered(reasons + fallback_reasons)
+
+    recent_unique = bool(recent_text) and len(reasons) >= 2 and any(
+        reason in reasons
+        for reason in ["unique_scale", "specific_architecture", "evaluation_depth", "operational_detail"]
+    )
+    return min(1.0, len(reasons) / 4.0), unique_ordered(reasons, 6), recent_unique
+
+
+CURRENT_SCALE_PATTERNS = [
+    r"\b(?:30|35|50)m\+?\b",
+    r"\b\d+(?:\.\d+)?m\+?\s+(?:queries|documents|items|users|candidates|candidate\s+corpus)\b",
+    r"\b\d+(?:\.\d+)?k\+?\s+(?:documents|preference\s+pairs|pairs|queries|items|labels)\b",
+    r"\b8k\s*qps\b",
+    r"\bsub-?200ms\b",
+    r"\bp95\b",
+]
+
+CURRENT_ARCHITECTURE_TERMS = [
+    "bm25 + dense retrieval",
+    "bm25+dense",
+    "dense retrieval",
+    "faiss hnsw",
+    "bge-large",
+    "bge embeddings",
+    "pinecone retrieval",
+    "pinecone",
+    "llm-based re-ranker",
+    "llm based re-ranker",
+    "llm reranker",
+    "llm re-ranker",
+    "xgboost re-scoring",
+    "xgboost reranking",
+    "xgboost",
+    "bentoml",
+    "llama-2",
+    "mistral-7b",
+    "lora",
+    "qlora",
+    "faiss",
+    "sentence-transformers",
+]
+
+CURRENT_EVALUATION_TERMS = [
+    "ndcg",
+    "mrr",
+    "recall@k",
+    "precision@k",
+    "a/b testing",
+    "a/b test",
+    "simulated a/b",
+    "online a/b",
+    "offline metrics",
+    "offline-online correlation",
+    "human relevance judgments",
+    "explicit human judgments",
+    "human judgments",
+    "recruiter feedback loop",
+    "recruiter-feedback",
+]
+
+CURRENT_OPS_TERMS = [
+    "index versioning",
+    "embedding versioning",
+    "rollback paths",
+    "rollback",
+    "embedding drift monitoring",
+    "embedding drift",
+    "latency fallback",
+    "incremental index refresh",
+    "incremental refresh",
+    "dashboards",
+    "kubernetes",
+    "quantizing",
+    "batching",
+]
+
+CURRENT_IMPACT_TERMS = [
+    "improved ndcg",
+    "reduced p95",
+    "reduced latency",
+    "latency by",
+    "recruiter engagement",
+    "time-to-shortlist",
+    "search-relevance improvement",
+    "improved new-user retention",
+    "cost per inference",
+    "dropped from",
+]
+
+CURRENT_DOMAIN_TERMS = [
+    "candidate-jd matching",
+    "candidate jd matching",
+    "recruiter-facing search",
+    "recruiter facing search",
+    "candidate corpus",
+    "candidate sourcing",
+    "retrieval/ranking pipeline",
+    "ranking pipeline",
+    "recommendations-heavy consumer product",
+    "behavioral-signal integration",
+    "recruiter labels",
+]
+
+
+def date_month_value(value: object | None) -> int:
+    parsed = parse_date(value)
+    if parsed is None:
+        return 0
+    return parsed.year * 12 + parsed.month
+
+
+def current_or_recent_records(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    if not records:
+        return []
+    current = [record for record in records if bool(record.get("is_current"))]
+    if current:
+        return current
+    return [max(
+        records,
+        key=lambda record: max(
+            date_month_value(record.get("end_date")),
+            date_month_value(record.get("start_date")),
+        ),
+    )]
+
+
+def record_template_candidate_count(
+    record: dict[str, object],
+    global_template_stats: EvidenceRealismIndex | None,
+) -> int:
+    if global_template_stats is None:
+        return 0
+    exact = str(record.get("exact_template_fingerprint") or record.get("fingerprint") or "")
+    semantic = str(record.get("semantic_template_signature") or "")
+    return max(
+        global_template_stats.fingerprint_candidate_counts.get(exact, 0),
+        global_template_stats.semantic_candidate_counts.get(semantic, 0),
+    )
+
+
+def record_is_repeated_template(
+    record: dict[str, object],
+    global_template_stats: EvidenceRealismIndex | None,
+) -> bool:
+    if global_template_stats is None:
+        return False
+    exact = str(record.get("exact_template_fingerprint") or record.get("fingerprint") or "")
+    semantic = str(record.get("semantic_template_signature") or "")
+    candidate_count = record_template_candidate_count(record, global_template_stats)
+    return candidate_count >= 2 and has_any(exact + " " + semantic, ALL_CAREER_REASON_TERMS)
+
+
+def unique_current_role_evidence(
+    candidate: dict,
+    records: list[dict[str, object]] | None = None,
+) -> tuple[bool, int, list[str]]:
+    if records is None:
+        records = career_description_records(candidate)
+    recent_records = current_or_recent_records(records)
+    text = normalize_evidence_text(
+        " ".join(str(record.get("description") or "") for record in recent_records)
+    )
+    reasons: list[str] = []
+    if any(re.search(pattern, text) for pattern in CURRENT_SCALE_PATTERNS):
+        reasons.append("specific_scale")
+    if has_any(text, CURRENT_ARCHITECTURE_TERMS):
+        reasons.append("specific_architecture")
+    if has_any(text, CURRENT_EVALUATION_TERMS):
+        reasons.append("evaluation_depth")
+    if has_any(text, CURRENT_OPS_TERMS):
+        reasons.append("production_ops")
+    if has_any(text, CURRENT_IMPACT_TERMS) or re.search(r"\bimprov(?:ed|ement)\b.*\b\d+(?:\.\d+)?%", text):
+        reasons.append("concrete_impact")
+    if has_any(text, CURRENT_DOMAIN_TERMS):
+        reasons.append("domain_match")
+    reasons = unique_ordered(reasons, 8)
+    return len(reasons) >= 3, len(reasons), reasons
+
+
+def guardrail_recent_role_template_heavy(
+    candidate: dict,
+    global_template_stats: EvidenceRealismIndex | None,
+    template_analysis: dict[str, object],
+    records: list[dict[str, object]] | None = None,
+) -> bool:
+    if records is None:
+        records = career_description_records(candidate)
+    recent_records = current_or_recent_records(records)
+    recent_repeated = any(record_is_repeated_template(record, global_template_stats) for record in recent_records)
+    recent_high_frequency = any(
+        record_template_candidate_count(record, global_template_stats) >= 4
+        for record in recent_records
+    )
+    return bool(
+        recent_high_frequency
+        or template_analysis.get("same_candidate_repeated_template")
+        or (
+            float(template_analysis.get("repeated_template_ratio") or 0.0) >= 0.50
+            and recent_repeated
+        )
+    )
+
+
 def repeated_template_stats(
     candidate: dict,
     index: EvidenceRealismIndex | None,
     records: list[dict[str, object]] | None = None,
 ) -> tuple[float, int, bool, list[str]]:
-    if index is None:
-        return 0.0, 0, False, []
+    analysis = career_template_analysis(candidate, index, records=records)
+    return (
+        float(analysis["template_penalty_after_unique_offset"]),
+        int(analysis["max_template_candidate_count"]),
+        bool(analysis["same_candidate_repeated_template"]),
+        list(analysis["career_template_reason_codes"]),
+    )
 
-    penalty = 0.0
-    max_repeated_count = 0
-    reason_codes: list[str] = []
+
+def career_template_analysis(
+    candidate: dict,
+    global_template_stats: EvidenceRealismIndex | None,
+    records: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    if global_template_stats is None:
+        return {
+            "career_template_penalty": 0.0,
+            "career_template_reason_codes": [],
+            "repeated_role_count": 0,
+            "max_template_candidate_count": 0,
+            "repeated_template_ratio": 0.0,
+            "current_role_template_heavy": False,
+            "unique_evidence_score": 0.0,
+            "unique_evidence_reason_codes": [],
+            "template_penalty_before_unique_offset": 0.0,
+            "template_penalty_after_unique_offset": 0.0,
+            "same_candidate_repeated_template": False,
+        }
+
     if records is None:
         records = career_description_records(candidate)
-    fingerprints = [
-        str(record.get("fingerprint") or "")
-        for record in records
+
+    role_descriptions = [
+        record for record in records
+        if str(record.get("description") or "").strip()
     ]
-    fingerprint_counts = Counter(fp for fp in fingerprints if fp)
+    total_roles = len(role_descriptions)
+    reason_codes: list[str] = []
+    repeated_records = 0
+    repeated_fingerprints: set[str] = set()
+    repeated_signatures: set[str] = set()
+    max_candidate_count = 0
+    max_role_count = 0
+    current_role_template_heavy = False
+
+    exact_counts = Counter(
+        str(record.get("exact_template_fingerprint") or record.get("fingerprint") or "")
+        for record in role_descriptions
+    )
+    semantic_counts = Counter(
+        str(record.get("semantic_template_signature") or "")
+        for record in role_descriptions
+    )
 
     same_candidate_repeated = any(
-        own_count > 1 and len(fingerprint) >= 80 and has_any(fingerprint, ALL_CAREER_REASON_TERMS)
-        for fingerprint, own_count in fingerprint_counts.items()
+        count > 1 and len(value) >= 60 and has_any(value, ALL_CAREER_REASON_TERMS)
+        for value, count in list(exact_counts.items()) + list(semantic_counts.items())
     )
+
+    raw_penalty = 0.0
     if same_candidate_repeated:
-        penalty += 0.02
+        raw_penalty += 0.025
         reason_codes.append("same_candidate_repeated_role_template")
 
-    repeated_penalty = 0.0
-    for fingerprint in fingerprint_counts:
-        if len(fingerprint) < 80 or not has_any(fingerprint, ALL_CAREER_REASON_TERMS):
-            continue
-        corpus_count = index.fingerprint_candidate_counts.get(fingerprint, 0)
-        max_repeated_count = max(max_repeated_count, corpus_count)
-        if 2 <= corpus_count <= 3:
-            repeated_penalty += 0.01
-        elif 4 <= corpus_count <= 8:
-            repeated_penalty += 0.025
-        elif corpus_count > 8:
-            repeated_penalty += 0.04
-    repeated_penalty = min(0.05, repeated_penalty)
-    if repeated_penalty:
-        penalty += repeated_penalty
-        reason_codes.append("repeated_career_template")
+    for record in role_descriptions:
+        exact = str(record.get("exact_template_fingerprint") or record.get("fingerprint") or "")
+        semantic = str(record.get("semantic_template_signature") or "")
+        exact_candidate_count = global_template_stats.fingerprint_candidate_counts.get(exact, 0)
+        exact_role_count = global_template_stats.fingerprint_role_counts.get(exact, 0)
+        semantic_candidate_count = global_template_stats.semantic_candidate_counts.get(semantic, 0)
+        semantic_role_count = global_template_stats.semantic_role_counts.get(semantic, 0)
+        candidate_count = max(exact_candidate_count, semantic_candidate_count)
+        role_count = max(exact_role_count, semantic_role_count)
+        max_candidate_count = max(max_candidate_count, candidate_count)
+        max_role_count = max(max_role_count, role_count)
 
-    return penalty, max_repeated_count, same_candidate_repeated, reason_codes
+        is_repeated = (
+            candidate_count >= 2
+            and (
+                (len(exact) >= 60 and has_any(exact, ALL_CAREER_REASON_TERMS))
+                or (len(semantic) >= 50 and has_any(semantic, ALL_CAREER_REASON_TERMS))
+            )
+        )
+        if not is_repeated:
+            continue
+        repeated_records += 1
+        if exact:
+            repeated_fingerprints.add(exact)
+        if semantic:
+            repeated_signatures.add(semantic)
+        if role_overlaps_recent(record):
+            current_role_template_heavy = True
+
+    for value in repeated_fingerprints.union(repeated_signatures):
+        candidate_count = max(
+            global_template_stats.fingerprint_candidate_counts.get(value, 0),
+            global_template_stats.semantic_candidate_counts.get(value, 0),
+        )
+        if 2 <= candidate_count <= 3:
+            raw_penalty += 0.010
+        elif 4 <= candidate_count <= 8:
+            raw_penalty += 0.025
+        elif candidate_count >= 9:
+            raw_penalty += 0.040
+
+    if repeated_records:
+        reason_codes.append("repeated_career_template")
+    if max_candidate_count >= 9:
+        reason_codes.append("high_frequency_career_template")
+    if len(repeated_fingerprints.union(repeated_signatures)) >= 2 or repeated_records >= 2:
+        raw_penalty += min(0.025, 0.010 + 0.005 * (repeated_records - 1))
+        reason_codes.append("multiple_repeated_templates")
+    if current_role_template_heavy:
+        raw_penalty *= 1.25
+        reason_codes.append("template_heavy_recent_role")
+
+    unique_score, unique_reasons, recent_unique = unique_evidence_score(
+        candidate,
+        records=records,
+        global_template_stats=global_template_stats,
+    )
+    offset_multiplier = 1.0
+    if unique_score >= 0.50:
+        offset_multiplier = 0.50 if recent_unique else 0.70
+        reason_codes.append("unique_evidence_offsets_template_risk")
+
+    cap = 0.085 if current_role_template_heavy and unique_score < 0.50 else 0.065
+    before_offset = min(raw_penalty, cap)
+    after_offset = min(before_offset * offset_multiplier, cap)
+
+    return {
+        "career_template_penalty": after_offset,
+        "career_template_reason_codes": unique_ordered(reason_codes, 10),
+        "repeated_role_count": repeated_records,
+        "max_template_candidate_count": max_candidate_count,
+        "max_template_role_count": max_role_count,
+        "repeated_template_ratio": (repeated_records / total_roles) if total_roles else 0.0,
+        "current_role_template_heavy": current_role_template_heavy,
+        "unique_evidence_score": unique_score,
+        "unique_evidence_reason_codes": unique_reasons,
+        "template_penalty_before_unique_offset": before_offset,
+        "template_penalty_after_unique_offset": after_offset,
+        "same_candidate_repeated_template": same_candidate_repeated,
+    }
+
+
+def career_template_penalty(
+    candidate: dict,
+    global_template_stats: EvidenceRealismIndex | None,
+) -> tuple[float, list[str]]:
+    analysis = career_template_analysis(candidate, global_template_stats)
+    return (
+        float(analysis["career_template_penalty"]),
+        list(analysis["career_template_reason_codes"]),
+    )
 
 
 def evidence_realism_penalty(
@@ -898,38 +1505,6 @@ def evidence_realism_penalty(
 
     if records is None:
         records = career_description_records(candidate)
-    if repeated_template_details is None:
-        repeated_template_details = repeated_template_stats(candidate, index, records=records)
-    repeated_penalty, _, _, repeated_reasons = repeated_template_details
-    penalty += repeated_penalty
-    reason_codes.extend(repeated_reasons)
-
-    description_counts = Counter(str(record["normalized"]) for record in records)
-
-    if index is not None:
-        for description, own_count in description_counts.items():
-            corpus_count = index.description_counts.get(description, 0)
-            if own_count > 1:
-                penalty += 0.02
-                reason_codes.append("same_candidate_repeated_role_template")
-            if corpus_count >= 3 and has_any(description, ALL_CAREER_REASON_TERMS):
-                penalty += 0.01 + min(0.02, 0.003 * (corpus_count - 3))
-                reason_codes.append("repeated_career_template")
-
-    repeated_sentence_hits = 0
-    if index is not None:
-        for sentence in career_sentences(candidate):
-            normalized = normalize_evidence_text(sentence)
-            if len(normalized) < 70 or not has_any(normalized, ALL_CAREER_REASON_TERMS):
-                continue
-            corpus_count = index.sentence_counts.get(normalized, 0)
-            company_count = len(index.sentence_companies.get(normalized, set()))
-            if corpus_count >= 4 and company_count >= 3:
-                repeated_sentence_hits += 1
-
-    if repeated_sentence_hits:
-        penalty += min(0.04, 0.012 * repeated_sentence_hits)
-        reason_codes.append("repeated_career_template")
 
     if has_duration_contradiction(candidate):
         penalty += 0.04
@@ -939,16 +1514,6 @@ def evidence_realism_penalty(
         penalty += 0.018
         reason_codes.append("company_domain_description_mismatch")
 
-    unique_support = 0
-    if extract_impact_signals(candidate):
-        unique_support += 1
-    if concise_eval(candidate):
-        unique_support += 1
-    if has_any(career_text(candidate), ["latency", "monitoring", "model serving", "feature pipeline", "pipeline", "api"]):
-        unique_support += 1
-    if reason_codes and unique_support >= 2:
-        penalty *= 0.75
-
     hard_realism_issue = any(
         code in reason_codes
         for code in [
@@ -957,20 +1522,7 @@ def evidence_realism_penalty(
             "weak_hireability_cluster",
         ]
     )
-    profile_consistency_only = all(
-        code in {
-            "repeated_career_template",
-            "same_candidate_repeated_role_template",
-            "company_domain_description_mismatch",
-        }
-        for code in reason_codes
-    )
-    has_same_candidate_template = "same_candidate_repeated_role_template" in reason_codes
-    if strong_technical and unique_support >= 2 and profile_consistency_only and has_same_candidate_template:
-        cap = 0.04
-    elif strong_technical and unique_support >= 2 and profile_consistency_only:
-        cap = 0.02
-    elif strong_technical and unique_support >= 2 and not hard_realism_issue:
+    if strong_technical and reason_codes and not hard_realism_issue:
         cap = 0.04
     else:
         cap = 0.10 if strong_technical else 0.12
@@ -1908,10 +2460,25 @@ def hireability_tradeoff_note(result: RerankResult) -> str:
 
 
 def realism_tradeoff_note(result: RerankResult) -> str:
-    if result.evidence_realism_penalty < 0.04 and result.seniority_drift_penalty < 0.04:
+    if (
+        result.evidence_realism_penalty < 0.04
+        and result.career_template_penalty < 0.04
+        and result.top5_template_guardrail_penalty < 0.03
+        and result.seniority_drift_penalty < 0.04
+    ):
         return ""
     candidate = result.row["candidate"]
-    codes = set(result.evidence_realism_reason_codes + result.seniority_alignment_reason_codes)
+    codes = set(
+        result.evidence_realism_reason_codes
+        + result.career_template_reason_codes
+        + result.seniority_alignment_reason_codes
+    )
+    if result.top5_guardrail_applied:
+        return phrase_variant(candidate, "realism-top5-guardrail", [
+            "Nearby candidates show more specific current production evidence.",
+            "Comparable profiles show more distinctive hands-on retrieval depth.",
+            "Current-role evidence is less specific than nearby retrieval profiles.",
+        ])
     if "recent_leadership_heavy" in codes or "recent_leadership_ownership_with_weak_hands_on" in codes:
         return phrase_variant(candidate, "realism-leadership", [
             "Recent role wording leans leadership-heavy.",
@@ -1934,8 +2501,6 @@ def realism_tradeoff_note(result: RerankResult) -> str:
         code in codes
         for code in [
             "salary_range_inverted",
-            "repeated_career_template",
-            "same_candidate_repeated_role_template",
             "company_domain_description_mismatch",
         ]
     ):
@@ -1943,6 +2508,21 @@ def realism_tradeoff_note(result: RerankResult) -> str:
             "Profile consistency is a minor caveat.",
             "Profile consistency is less clean.",
             "Some profile consistency signals are weaker.",
+        ])
+    if any(
+        code in codes
+        for code in [
+            "repeated_career_template",
+            "same_candidate_repeated_role_template",
+            "high_frequency_career_template",
+            "multiple_repeated_templates",
+            "template_heavy_recent_role",
+        ]
+    ):
+        return phrase_variant(candidate, "realism-template-detail", [
+            "Nearby candidates show more specific production detail.",
+            "Comparable candidates show more distinctive implementation detail.",
+            "Strong enough technically, though implementation detail is less unique.",
         ])
     return ""
 
@@ -2207,7 +2787,12 @@ def build_ranked_reasoning(result: RerankResult, rank: int) -> str:
     reasoning = top_evidence_sentence(candidate, diffs)
     if hireability_tradeoff and (rank <= 60 or result.hireability_penalty >= 0.07):
         reasoning = append_reasoning_note(reasoning, hireability_tradeoff)
-    elif realism_tradeoff and (rank <= 60 or result.evidence_realism_penalty >= 0.05 or result.seniority_drift_penalty >= 0.04):
+    elif realism_tradeoff and (
+        rank <= 60
+        or result.evidence_realism_penalty >= 0.05
+        or result.top5_template_guardrail_penalty >= 0.03
+        or result.seniority_drift_penalty >= 0.04
+    ):
         reasoning = append_reasoning_note(reasoning, realism_tradeoff)
     elif tier in {"solid", "cutoff"} and caveat:
         reasoning = f"{reasoning.rstrip('.;')} ; {caveat}."
@@ -2991,11 +3576,19 @@ def candidate_debug_flags(
     nontechnical_penalty_total: float = 0.0,
     weak_count: int | None = None,
     repeated_template_details: tuple[float, int, bool, list[str]] | None = None,
+    template_analysis: dict[str, object] | None = None,
     hands_score: float | None = None,
     leadership_score: float | None = None,
 ) -> dict[str, object]:
+    if template_analysis is None:
+        template_analysis = career_template_analysis(candidate, realism_index)
     if repeated_template_details is None:
-        repeated_template_details = repeated_template_stats(candidate, realism_index)
+        repeated_template_details = (
+            float(template_analysis["career_template_penalty"]),
+            int(template_analysis["max_template_candidate_count"]),
+            bool(template_analysis["same_candidate_repeated_template"]),
+            list(template_analysis["career_template_reason_codes"]),
+        )
     repeated_penalty, repeated_count, same_repeated, _ = repeated_template_details
     if weak_count is None:
         weak_count = weak_hireability_signal_count(candidate)
@@ -3021,6 +3614,16 @@ def candidate_debug_flags(
         "recent_leadership_heavy": leadership_score >= 0.67 and hands_score < 0.67,
         "tech_lead_aspiration_soft_risk": tech_lead_risk,
         "repeated_career_template_penalty": repeated_penalty,
+        "career_template_penalty": float(template_analysis["career_template_penalty"]),
+        "career_template_reason_codes": list(template_analysis["career_template_reason_codes"]),
+        "repeated_role_count": int(template_analysis["repeated_role_count"]),
+        "max_template_candidate_count": int(template_analysis["max_template_candidate_count"]),
+        "repeated_template_ratio": float(template_analysis["repeated_template_ratio"]),
+        "current_role_template_heavy": bool(template_analysis["current_role_template_heavy"]),
+        "unique_evidence_score": float(template_analysis["unique_evidence_score"]),
+        "unique_evidence_reason_codes": list(template_analysis["unique_evidence_reason_codes"]),
+        "template_penalty_before_unique_offset": float(template_analysis["template_penalty_before_unique_offset"]),
+        "template_penalty_after_unique_offset": float(template_analysis["template_penalty_after_unique_offset"]),
         "nontechnical_penalty_total": nontechnical_penalty_total,
     }
 
@@ -3059,14 +3662,25 @@ def rerank_row(row: dict, realism_index: EvidenceRealismIndex) -> RerankResult:
     hireability_penalty, hireability_reason_codes = hireability_risk(candidate, strong_technical)
     weak_count = weak_hireability_signal_count(candidate)
     description_records = career_description_records(candidate)
-    repeated_details = repeated_template_stats(candidate, realism_index, records=description_records)
+    template_analysis = career_template_analysis(candidate, realism_index, records=description_records)
+    template_penalty = float(template_analysis["career_template_penalty"])
+    template_reason_codes = list(template_analysis["career_template_reason_codes"])
+    guardrail_current_heavy = guardrail_recent_role_template_heavy(
+        candidate,
+        realism_index,
+        template_analysis,
+        records=description_records,
+    )
+    strong_current_unique, current_unique_count, current_unique_reasons = unique_current_role_evidence(
+        candidate,
+        records=description_records,
+    )
     realism_penalty, realism_reason_codes = evidence_realism_penalty(
         candidate,
         realism_index,
         strong_technical,
         weak_hireability_count=weak_count,
         records=description_records,
-        repeated_template_details=repeated_details,
     )
     seniority_drift_penalty, senior_ic_bonus, seniority_alignment_reason_codes = seniority_alignment_adjustment(
         candidate,
@@ -3074,7 +3688,7 @@ def rerank_row(row: dict, realism_index: EvidenceRealismIndex) -> RerankResult:
         hireability_penalty,
         realism_penalty,
     )
-    nontechnical_penalty_raw = hireability_penalty + realism_penalty + seniority_drift_penalty
+    nontechnical_penalty_raw = hireability_penalty + realism_penalty + template_penalty + seniority_drift_penalty
     nontechnical_penalty_cap = 0.18 if strong_technical else 0.30
     nontechnical_penalty_total = min(nontechnical_penalty_raw, nontechnical_penalty_cap)
     final = clamp(
@@ -3084,6 +3698,7 @@ def rerank_row(row: dict, realism_index: EvidenceRealismIndex) -> RerankResult:
     )
     components["hireability_penalty"] = hireability_penalty
     components["evidence_realism_penalty"] = realism_penalty
+    components["career_template_penalty"] = template_penalty
     components["seniority_drift_penalty"] = seniority_drift_penalty
     components["senior_ic_alignment_bonus"] = senior_ic_bonus
     components["nontechnical_penalty_total"] = nontechnical_penalty_total
@@ -3092,8 +3707,18 @@ def rerank_row(row: dict, realism_index: EvidenceRealismIndex) -> RerankResult:
         realism_index,
         nontechnical_penalty_total=nontechnical_penalty_total,
         weak_count=weak_count,
-        repeated_template_details=repeated_details,
+        template_analysis=template_analysis,
     )
+    debug_flags["current_role_template_heavy"] = guardrail_current_heavy
+    debug_flags["strong_unique_current_role_evidence"] = strong_current_unique
+    debug_flags["unique_current_role_signal_count"] = current_unique_count
+    debug_flags["unique_current_role_reason_codes"] = current_unique_reasons
+    debug_flags["top5_template_guardrail_penalty"] = 0.0
+    debug_flags["top5_template_guardrail_reason"] = ""
+    debug_flags["top5_guardrail_applied"] = False
+    debug_flags["top10_not_open_guardrail_penalty"] = 0.0
+    debug_flags["top10_not_open_guardrail_reason"] = ""
+    debug_flags["top10_not_open_guardrail_applied"] = False
     return RerankResult(
         candidate_id=str(candidate["candidate_id"]),
         original_rank=int(row.get("rank") or 0),
@@ -3106,9 +3731,21 @@ def rerank_row(row: dict, realism_index: EvidenceRealismIndex) -> RerankResult:
         hireability_reason_codes=hireability_reason_codes,
         evidence_realism_penalty=realism_penalty,
         evidence_realism_reason_codes=realism_reason_codes,
+        career_template_penalty=template_penalty,
+        career_template_reason_codes=template_reason_codes,
         seniority_drift_penalty=seniority_drift_penalty,
         senior_ic_alignment_bonus=senior_ic_bonus,
         seniority_alignment_reason_codes=seniority_alignment_reason_codes,
+        top5_template_guardrail_penalty=0.0,
+        top5_template_guardrail_reason="",
+        top5_guardrail_applied=False,
+        strong_unique_current_role_evidence=strong_current_unique,
+        unique_current_role_signal_count=current_unique_count,
+        final_calibration_penalty=0.0,
+        final_calibration_reason_codes=[],
+        top10_not_open_guardrail_penalty=0.0,
+        top10_not_open_guardrail_reason="",
+        top10_not_open_guardrail_applied=False,
         primary_differentiator=primary,
         reasoning=build_candidate_reasoning(candidate, components, reason_codes),
         debug_flags=debug_flags,
@@ -3138,6 +3775,308 @@ def load_rejected_ids(path: Path) -> set[str]:
             if cid:
                 rejected.add(str(cid))
     return rejected
+
+
+TOP5_TEMPLATE_GUARDRAIL_CODES = {
+    "high_frequency_career_template",
+    "multiple_repeated_templates",
+    "same_candidate_repeated_role_template",
+    "template_heavy_recent_role",
+}
+
+
+def technical_composite_score(result: RerankResult) -> float:
+    return (
+        0.45 * float(result.components.get("career_evidence_score", 0.0))
+        + 0.35 * float(result.components.get("jd_pillar_score", 0.0))
+        + 0.20 * float(result.components.get("hands_on_depth_score", 0.0))
+    )
+
+
+def result_has_high_frequency_template(result: RerankResult) -> bool:
+    codes = set(result.career_template_reason_codes)
+    return bool(
+        int(result.debug_flags.get("max_template_candidate_count", 0) or 0) >= 4
+        or bool(codes & TOP5_TEMPLATE_GUARDRAIL_CODES)
+    )
+
+
+def result_is_template_top5_risk(result: RerankResult) -> bool:
+    return bool(
+        result.debug_flags.get("current_role_template_heavy", False)
+        and result_has_high_frequency_template(result)
+        and not result.strong_unique_current_role_evidence
+    )
+
+
+def result_has_severe_hireability_risk(result: RerankResult) -> bool:
+    return bool(
+        result.hireability_penalty >= 0.07
+        or int(result.debug_flags.get("weak_hireability_signal_count", 0) or 0) >= 4
+    )
+
+
+def comparable_guardrail_replacement(candidate: RerankResult, target: RerankResult) -> bool:
+    if bool(candidate.debug_flags.get("current_role_template_heavy", False)):
+        return False
+    if result_is_template_top5_risk(candidate):
+        return False
+    if result_has_severe_hireability_risk(candidate):
+        return False
+    candidate_unique = float(candidate.debug_flags.get("unique_evidence_score", 0.0) or 0.0)
+    target_unique = float(target.debug_flags.get("unique_evidence_score", 0.0) or 0.0)
+    if candidate_unique <= target_unique and candidate.unique_current_role_signal_count <= target.unique_current_role_signal_count:
+        return False
+    candidate_technical = technical_composite_score(candidate)
+    target_technical = technical_composite_score(target)
+    return bool(
+        abs(candidate_technical - target_technical) <= 0.05
+        or (
+            float(candidate.components.get("career_evidence_score", 0.0)) >= 0.75
+            and float(candidate.components.get("jd_pillar_score", 0.0)) >= 0.75
+        )
+        or candidate_unique >= target_unique + 0.15
+        or candidate.unique_current_role_signal_count >= target.unique_current_role_signal_count + 2
+    )
+
+
+def top5_guardrail_penalty_size(result: RerankResult) -> float:
+    codes = set(result.career_template_reason_codes)
+    has_some_unique = result.unique_current_role_signal_count > 0 or float(result.debug_flags.get("unique_evidence_score", 0.0) or 0.0) > 0
+    if (
+        "same_candidate_repeated_role_template" in codes
+        and bool(result.debug_flags.get("current_role_template_heavy", False))
+    ):
+        return 0.07
+    if bool(result.debug_flags.get("current_role_template_heavy", False)) and not result.strong_unique_current_role_evidence:
+        return 0.05
+    if has_some_unique:
+        return 0.03
+    return 0.05
+
+
+def top5_guardrail_reason(result: RerankResult, replacement: RerankResult) -> str:
+    if "same_candidate_repeated_role_template" in result.career_template_reason_codes:
+        return f"same_candidate_repeated_recent_template;nearby_unique_current_evidence:{replacement.candidate_id}"
+    if "high_frequency_career_template" in result.career_template_reason_codes:
+        return f"high_frequency_recent_template;nearby_unique_current_evidence:{replacement.candidate_id}"
+    return f"template_heavy_recent_role_without_strong_unique_current_evidence;nearby_unique_current_evidence:{replacement.candidate_id}"
+
+
+def apply_top5_template_guardrail(results: list[RerankResult]) -> None:
+    if len(results) < 6:
+        return
+    iterations = 0
+    while iterations < 5:
+        iterations += 1
+        results.sort(key=lambda item: (-item.final_score, item.candidate_id))
+        changed = False
+        floor_index = min(99, len(results) - 1)
+        floor_score = results[floor_index].final_score
+        for result in list(results[:5]):
+            if result.top5_guardrail_applied or not result_is_template_top5_risk(result):
+                continue
+            nearby = [
+                candidate for candidate in results[5:20]
+                if comparable_guardrail_replacement(candidate, result)
+            ]
+            if not nearby:
+                continue
+            replacement = max(
+                nearby,
+                key=lambda item: (
+                    item.unique_current_role_signal_count,
+                    float(item.debug_flags.get("unique_evidence_score", 0.0) or 0.0),
+                    technical_composite_score(item),
+                    item.final_score,
+                ),
+            )
+            penalty = top5_guardrail_penalty_size(result)
+            penalty = max(0.0, min(penalty, result.final_score - floor_score + 0.000001))
+            if penalty <= 0:
+                continue
+            reason = top5_guardrail_reason(result, replacement)
+            result.final_score = clamp(result.final_score - penalty)
+            result.top5_template_guardrail_penalty = penalty
+            result.top5_template_guardrail_reason = reason
+            result.top5_guardrail_applied = True
+            result.components["top5_template_guardrail_penalty"] = penalty
+            result.debug_flags["top5_template_guardrail_penalty"] = penalty
+            result.debug_flags["top5_template_guardrail_reason"] = reason
+            result.debug_flags["top5_guardrail_applied"] = True
+            changed = True
+        if not changed:
+            break
+    results.sort(key=lambda item: (-item.final_score, item.candidate_id))
+
+
+def final_calibration_penalty(result: RerankResult) -> tuple[float, list[str]]:
+    penalty = 0.0
+    reasons: list[str] = []
+    max_template_count = int(result.debug_flags.get("max_template_candidate_count", 0) or 0)
+    repeated_ratio = float(result.debug_flags.get("repeated_template_ratio", 0.0) or 0.0)
+    current_template_heavy = bool(result.debug_flags.get("current_role_template_heavy", False))
+    high_frequency_current = current_template_heavy and max_template_count >= 4
+
+    if high_frequency_current:
+        if result.strong_unique_current_role_evidence:
+            if max_template_count >= 9 and repeated_ratio >= 0.75:
+                penalty += 0.030
+                reasons.append("high_frequency_current_template_with_repeated_ratio")
+            else:
+                penalty += 0.015
+                reasons.append("high_frequency_current_template_with_unique_current_evidence")
+        else:
+            penalty += 0.025
+            reasons.append("high_frequency_current_template_weak_unique_current_evidence")
+            if repeated_ratio >= 0.75:
+                penalty += 0.010
+                reasons.append("dominant_repeated_current_template")
+            if "same_candidate_repeated_role_template" in result.career_template_reason_codes:
+                penalty += 0.010
+                reasons.append("same_candidate_repeated_current_template")
+
+    s = signals(result.row["candidate"])
+    notice = float(s.get("notice_period_days") if s.get("notice_period_days") is not None else 0.0)
+    open_to_work = bool(s.get("open_to_work_flag"))
+    location_score = float(result.components.get("location_availability_score", 0.0))
+    if not open_to_work and current_template_heavy:
+        if result.strong_unique_current_role_evidence:
+            penalty += 0.025
+            reasons.append("not_open_template_heavy_with_unique_current_evidence")
+        else:
+            penalty += 0.040
+            reasons.append("not_open_template_heavy_weak_unique_current_evidence")
+        if repeated_ratio >= 0.75 or max_template_count >= 9:
+            penalty += 0.010
+            reasons.append("not_open_high_frequency_current_template")
+
+    if current_template_heavy and notice >= 90 and location_score <= 0.60:
+        penalty += 0.020
+        reasons.append("template_heavy_long_notice_location_risk")
+
+    if (
+        result.final_score >= 0.80
+        and not open_to_work
+        and not result.strong_unique_current_role_evidence
+    ):
+        penalty += 0.012
+        reasons.append("not_open_weak_unique_current_evidence")
+        if notice > 30:
+            penalty += 0.005
+            reasons.append("not_open_notice_above_30")
+
+    return min(penalty, 0.080), unique_ordered(reasons, 8)
+
+
+def apply_final_score_calibration(results: list[RerankResult]) -> None:
+    if not results:
+        return
+    results.sort(key=lambda item: (-item.final_score, item.candidate_id))
+    floor_score = results[min(99, len(results) - 1)].final_score
+    for result in results:
+        penalty, reasons = final_calibration_penalty(result)
+        if penalty <= 0:
+            result.debug_flags["final_calibration_penalty"] = 0.0
+            result.debug_flags["final_calibration_reason_codes"] = []
+            continue
+        penalty = min(penalty, max(0.0, result.final_score - floor_score + 0.000001))
+        if penalty <= 0:
+            result.debug_flags["final_calibration_penalty"] = 0.0
+            result.debug_flags["final_calibration_reason_codes"] = []
+            continue
+        result.final_score = clamp(result.final_score - penalty)
+        result.final_calibration_penalty = penalty
+        result.final_calibration_reason_codes = reasons
+        result.components["final_calibration_penalty"] = penalty
+        result.debug_flags["final_calibration_penalty"] = penalty
+        result.debug_flags["final_calibration_reason_codes"] = reasons
+    results.sort(key=lambda item: (-item.final_score, item.candidate_id))
+
+
+def result_is_open_to_work(result: RerankResult) -> bool:
+    return bool(signals(result.row["candidate"]).get("open_to_work_flag"))
+
+
+def not_open_elite_exception(result: RerankResult, nearby_open: list[RerankResult]) -> bool:
+    if result.debug_flags.get("current_role_template_heavy", False):
+        return False
+    if not result.strong_unique_current_role_evidence or result.unique_current_role_signal_count < 4:
+        return False
+    unique_score = float(result.debug_flags.get("unique_evidence_score", 0.0) or 0.0)
+    if unique_score < 0.75:
+        return False
+    if not nearby_open:
+        return True
+    best_open_unique_count = max(item.unique_current_role_signal_count for item in nearby_open)
+    best_open_technical = max(technical_composite_score(item) for item in nearby_open)
+    return bool(
+        result.unique_current_role_signal_count >= best_open_unique_count + 1
+        or technical_composite_score(result) >= best_open_technical + 0.05
+    )
+
+
+def top10_not_open_guardrail_reason(result: RerankResult, replacement: RerankResult) -> str:
+    if result.debug_flags.get("current_role_template_heavy", False):
+        return f"not_open_template_heavy_top10;nearby_open_candidate:{replacement.candidate_id}"
+    if not result.strong_unique_current_role_evidence:
+        return f"not_open_weak_unique_current_evidence_top10;nearby_open_candidate:{replacement.candidate_id}"
+    return f"not_open_not_elite_vs_nearby_open_candidate:{replacement.candidate_id}"
+
+
+def apply_top10_not_open_guardrail(results: list[RerankResult]) -> None:
+    if len(results) < 11:
+        return
+    iterations = 0
+    while iterations < 5:
+        iterations += 1
+        results.sort(key=lambda item: (-item.final_score, item.candidate_id))
+        nearby_open = [
+            item for item in results[10:20]
+            if result_is_open_to_work(item) and not result_has_severe_hireability_risk(item)
+        ]
+        if not nearby_open:
+            nearby_open = [
+                item for item in results[10:20]
+                if result_is_open_to_work(item)
+            ]
+        changed = False
+        floor_score = results[min(99, len(results) - 1)].final_score
+        for result in list(results[:10]):
+            if result.top10_not_open_guardrail_applied or result_is_open_to_work(result):
+                continue
+            if not_open_elite_exception(result, nearby_open):
+                continue
+            if nearby_open:
+                replacement = max(
+                    nearby_open,
+                    key=lambda item: (
+                        item.final_score,
+                        item.unique_current_role_signal_count,
+                        technical_composite_score(item),
+                    ),
+                )
+                needed = max(0.0, result.final_score - replacement.final_score + 0.000001)
+            else:
+                replacement = results[min(10, len(results) - 1)]
+                needed = 0.035
+            penalty = min(max(0.035, needed), 0.080)
+            penalty = min(penalty, max(0.0, result.final_score - floor_score + 0.000001))
+            if penalty <= 0:
+                continue
+            reason = top10_not_open_guardrail_reason(result, replacement)
+            result.final_score = clamp(result.final_score - penalty)
+            result.top10_not_open_guardrail_penalty = penalty
+            result.top10_not_open_guardrail_reason = reason
+            result.top10_not_open_guardrail_applied = True
+            result.components["top10_not_open_guardrail_penalty"] = penalty
+            result.debug_flags["top10_not_open_guardrail_penalty"] = penalty
+            result.debug_flags["top10_not_open_guardrail_reason"] = reason
+            result.debug_flags["top10_not_open_guardrail_applied"] = True
+            changed = True
+        if not changed:
+            break
+    results.sort(key=lambda item: (-item.final_score, item.candidate_id))
 
 
 def ranked_output_rows(results: list[RerankResult]) -> list[tuple[int, RerankResult, float]]:
@@ -3202,6 +4141,9 @@ def write_debug(results: list[RerankResult], path: Path) -> None:
             "penalty_factor",
             "hireability_penalty",
             "evidence_realism_penalty",
+            "career_template_penalty",
+            "top5_template_guardrail_penalty",
+            "final_calibration_penalty",
             "seniority_drift_penalty",
             "senior_ic_alignment_bonus",
             "nontechnical_penalty_total",
@@ -3209,11 +4151,26 @@ def write_debug(results: list[RerankResult], path: Path) -> None:
             "reason_codes",
             "hireability_reason_codes",
             "evidence_realism_reason_codes",
+            "career_template_reason_codes",
+            "top5_template_guardrail_reason",
+            "final_calibration_reason_codes",
             "seniority_alignment_reason_codes",
             "salary_range_inverted",
             "weak_hireability_signal_count",
             "repeated_career_template_count",
             "same_candidate_repeated_template",
+            "repeated_role_count",
+            "max_template_candidate_count",
+            "repeated_template_ratio",
+            "current_role_template_heavy",
+            "strong_unique_current_role_evidence",
+            "unique_current_role_signal_count",
+            "unique_current_role_reason_codes",
+            "top5_guardrail_applied",
+            "unique_evidence_score",
+            "unique_evidence_reason_codes",
+            "template_penalty_before_unique_offset",
+            "template_penalty_after_unique_offset",
             "company_domain_description_mismatch",
             "recent_hands_on_score",
             "recent_leadership_score",
@@ -3241,6 +4198,9 @@ def write_debug(results: list[RerankResult], path: Path) -> None:
                 "primary_differentiator": result.primary_differentiator,
                 "hireability_penalty": f"{result.hireability_penalty:.6f}",
                 "evidence_realism_penalty": f"{result.evidence_realism_penalty:.6f}",
+                "career_template_penalty": f"{result.career_template_penalty:.6f}",
+                "top5_template_guardrail_penalty": f"{result.top5_template_guardrail_penalty:.6f}",
+                "final_calibration_penalty": f"{result.final_calibration_penalty:.6f}",
                 "seniority_drift_penalty": f"{result.seniority_drift_penalty:.6f}",
                 "senior_ic_alignment_bonus": f"{result.senior_ic_alignment_bonus:.6f}",
                 "nontechnical_penalty_total": f"{float(result.debug_flags.get('nontechnical_penalty_total', 0.0)):.6f}",
@@ -3248,11 +4208,26 @@ def write_debug(results: list[RerankResult], path: Path) -> None:
                 "reason_codes": ";".join(result.reason_codes),
                 "hireability_reason_codes": ";".join(result.hireability_reason_codes),
                 "evidence_realism_reason_codes": ";".join(result.evidence_realism_reason_codes),
+                "career_template_reason_codes": ";".join(result.career_template_reason_codes),
+                "top5_template_guardrail_reason": result.top5_template_guardrail_reason,
+                "final_calibration_reason_codes": ";".join(result.final_calibration_reason_codes),
                 "seniority_alignment_reason_codes": ";".join(result.seniority_alignment_reason_codes),
                 "salary_range_inverted": result.debug_flags.get("salary_range_inverted", False),
                 "weak_hireability_signal_count": result.debug_flags.get("weak_hireability_signal_count", 0),
                 "repeated_career_template_count": result.debug_flags.get("repeated_career_template_count", 0),
                 "same_candidate_repeated_template": result.debug_flags.get("same_candidate_repeated_template", False),
+                "repeated_role_count": result.debug_flags.get("repeated_role_count", 0),
+                "max_template_candidate_count": result.debug_flags.get("max_template_candidate_count", 0),
+                "repeated_template_ratio": f"{float(result.debug_flags.get('repeated_template_ratio', 0.0)):.6f}",
+                "current_role_template_heavy": result.debug_flags.get("current_role_template_heavy", False),
+                "strong_unique_current_role_evidence": result.strong_unique_current_role_evidence,
+                "unique_current_role_signal_count": result.unique_current_role_signal_count,
+                "unique_current_role_reason_codes": ";".join(result.debug_flags.get("unique_current_role_reason_codes", [])),
+                "top5_guardrail_applied": result.top5_guardrail_applied,
+                "unique_evidence_score": f"{float(result.debug_flags.get('unique_evidence_score', 0.0)):.6f}",
+                "unique_evidence_reason_codes": ";".join(result.debug_flags.get("unique_evidence_reason_codes", [])),
+                "template_penalty_before_unique_offset": f"{float(result.debug_flags.get('template_penalty_before_unique_offset', 0.0)):.6f}",
+                "template_penalty_after_unique_offset": f"{float(result.debug_flags.get('template_penalty_after_unique_offset', 0.0)):.6f}",
                 "company_domain_description_mismatch": result.debug_flags.get("company_domain_description_mismatch", False),
                 "recent_hands_on_score": f"{float(result.debug_flags.get('recent_hands_on_score', 0.0)):.6f}",
                 "recent_leadership_score": f"{float(result.debug_flags.get('recent_leadership_score', 0.0)):.6f}",
@@ -3292,11 +4267,20 @@ def validate_submission(results: list[RerankResult], rejected_ids: set[str]) -> 
         penalty_values = [
             result.hireability_penalty,
             result.evidence_realism_penalty,
+            result.career_template_penalty,
+            result.top5_template_guardrail_penalty,
+            result.final_calibration_penalty,
             result.seniority_drift_penalty,
             float(result.debug_flags.get("nontechnical_penalty_total", 0.0)),
         ]
         if any(math.isnan(value) for value in penalty_values):
             raise ValueError(f"NaN penalty in final top100 for {result.candidate_id}")
+    for result in results[:5]:
+        if result_is_template_top5_risk(result):
+            raise ValueError(
+                "Template-heavy high-frequency candidate without strong current evidence remained in top5: "
+                f"{result.candidate_id}"
+            )
     for previous, current in zip(results, results[1:]):
         if previous.final_score < current.final_score:
             raise ValueError("Scores are not sorted descending")
@@ -3391,10 +4375,27 @@ def validate_debug_columns(path: Path) -> None:
     required = {
         "evidence_realism_penalty",
         "evidence_realism_reason_codes",
+        "career_template_penalty",
+        "career_template_reason_codes",
+        "top5_template_guardrail_penalty",
+        "top5_template_guardrail_reason",
+        "final_calibration_penalty",
+        "final_calibration_reason_codes",
         "salary_range_inverted",
         "weak_hireability_signal_count",
         "repeated_career_template_count",
         "same_candidate_repeated_template",
+        "repeated_role_count",
+        "max_template_candidate_count",
+        "repeated_template_ratio",
+        "current_role_template_heavy",
+        "strong_unique_current_role_evidence",
+        "unique_current_role_signal_count",
+        "top5_guardrail_applied",
+        "unique_evidence_score",
+        "unique_evidence_reason_codes",
+        "template_penalty_before_unique_offset",
+        "template_penalty_after_unique_offset",
         "company_domain_description_mismatch",
         "recent_hands_on_score",
         "recent_leadership_score",
@@ -3426,6 +4427,8 @@ def rerank(
         if str(row.get("candidate_id") or row.get("candidate", {}).get("candidate_id")) not in rejected_ids
     ]
     results.sort(key=lambda item: (-item.final_score, item.candidate_id))
+    apply_top5_template_guardrail(results)
+    apply_final_score_calibration(results)
     selected = results[:100]
     for rank, result in enumerate(selected, start=1):
         result.reasoning = build_ranked_reasoning(result, rank)
