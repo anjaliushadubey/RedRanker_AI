@@ -3,7 +3,7 @@
 This module builds section-wise candidate text, caches SentenceTransformer
 embeddings, computes exact NumPy dense similarity by default, optionally runs
 Qdrant named-vector search, computes BM25 sparse scores over full candidate
-text, and blends them into a 70/30 hybrid score.
+text, and blends them into a hybrid score.
 """
 
 from __future__ import annotations
@@ -1006,17 +1006,24 @@ def qdrant_section_scores(
     query_vector: np.ndarray,
     candidate_count: int,
 ) -> np.ndarray:
+    query_limit = candidate_count + max(512, candidate_count // 20)
     response = client.query_points(
         collection_name=collection_name,
         query=query_vector.tolist(),
         using=section,
-        limit=candidate_count,
+        limit=query_limit,
         with_payload=False,
         with_vectors=False,
     )
     scores = np.zeros(candidate_count, dtype=float)
+    valid_points = 0
     for point in response.points:
-        scores[int(point.id)] = float(point.score)
+        point_id = int(point.id)
+        if 0 <= point_id < candidate_count:
+            scores[point_id] = float(point.score)
+            valid_points += 1
+            if valid_points >= candidate_count:
+                break
     return scores
 
 
