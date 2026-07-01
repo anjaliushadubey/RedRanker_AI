@@ -11,6 +11,38 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
+## Streamlit Demo
+
+This repository includes a lightweight hosted demo for the hackathon sandbox requirement. It does not run the full 100K-candidate embedding pipeline. Instead, it accepts a small JSONL, JSON, or CSV sample, applies the same hard-reject layer, computes a lightweight hybrid starting score, reuses the final evidence-based reranker, and outputs the standard CSV schema:
+
+```text
+candidate_id,rank,score,reasoning
+```
+
+Run locally:
+
+```powershell
+streamlit run app.py
+```
+
+Then either upload a small candidate file or use the bundled `sample_candidates.jsonl`.
+
+Supported upload formats:
+
+- JSONL: one full candidate record per line, matching the challenge schema.
+- JSON: a list of candidate records.
+- CSV: simple columns such as `candidate_id`, `current_title`, `headline`, `summary`, `years_of_experience`, `skills`, `career_history`, `location`, `country`, `notice_period_days`, and Redrob signal fields.
+
+Deploy on Streamlit Cloud:
+
+1. Push the repository to GitHub without the full `candidates.jsonl` dataset.
+2. Create a new Streamlit Cloud app from the repo.
+3. Set the entry point to `app.py`.
+4. Let Streamlit Cloud install `requirements.txt`.
+5. Open the app, upload a small sample, run the demo, and download `submission.csv`.
+
+The demo is designed to finish well under 5 minutes on CPU because it skips SentenceTransformer embedding generation, Qdrant indexing, and full-pool retrieval. The full-scale scripts below remain unchanged for final local submission generation.
+
 ## Run Baseline Pipeline
 
 ```powershell
@@ -88,6 +120,7 @@ When `--dense-backend qdrant` is used, the Qdrant index is persistent and metada
 - `candidate_schema.json`: schema for candidate records.
 - `candidates.jsonl`: full candidate dataset.
 - `sample_candidates.json`: small readable candidate sample.
+- `sample_candidates.jsonl`: tiny Streamlit-ready demo sample.
 - `sample_submission.csv`: CSV format reference only.
 - `submission_metadata.yaml`: local submission metadata file copied from the template.
 - `submission_metadata_template.yaml`: metadata template for final submission.
@@ -98,8 +131,10 @@ When `--dense-backend qdrant` is used, the Qdrant index is persistent and metada
 
 ```text
 rank.py
+app.py
 prepare_embeddings.py
 top2000.py
+rerank_top100.py
 validate_submission.py
 requirements.txt
 README.md

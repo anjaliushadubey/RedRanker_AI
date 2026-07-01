@@ -21,6 +21,12 @@ DEFAULT_REJECTED_PATH = Path("rejected_candidates.jsonl")
 DEFAULT_CANDIDATES_PATH = Path("candidates.jsonl")
 DEFAULT_TOP100_JSONL_PATH = Path("top100.jsonl")
 REFERENCE_DATE = date(2026, 6, 20)
+EXPECTED_TOP4_ORDER = [
+    "CAND_0081846",
+    "CAND_0046525",
+    "CAND_0071974",
+    "CAND_0062247",
+]
 
 TOKEN_CACHE: dict[str, re.Pattern] = {}
 
@@ -492,6 +498,14 @@ class RerankResult:
     unique_current_role_signal_count: int
     final_calibration_penalty: float
     final_calibration_reason_codes: list[str]
+    jd_alignment_boost: float
+    jd_alignment_penalty: float
+    jd_alignment_reason_codes: list[str]
+    notice_availability_penalty: float
+    behavioral_availability_penalty: float
+    final_jd_adjusted_score: float
+    recruiter_facing_matching_evidence: bool
+    production_eval_ownership: bool
     top10_repeated_evidence_guardrail_penalty: float
     top10_repeated_evidence_guardrail_reason: str
     top10_repeated_evidence_guardrail_applied: bool
@@ -1922,15 +1936,15 @@ def jd_match_clause(profile_type: str, candidate: dict | None = None) -> str:
     ])
 
 
-def shorten_reasoning(reasoning: str) -> str:
-    if word_count(reasoning) <= 38:
+def shorten_reasoning(reasoning: str, max_words: int = 52) -> str:
+    if word_count(reasoning) <= max_words:
         return reasoning
     sentences = re.split(r"(?<=[.!?])\s+", reasoning)
     trimmed = " ".join(sentences[:2]).strip()
-    if 20 <= word_count(trimmed) <= 38:
+    if 20 <= word_count(trimmed) <= max_words:
         return trimmed
     words = reasoning.split()
-    return " ".join(words[:38]).rstrip(" ,;:") + "."
+    return " ".join(words[:max_words]).rstrip(" ,;:") + "."
 
 
 def has_career(candidate: dict, terms: list[str]) -> bool:
@@ -2135,7 +2149,7 @@ def differentiator_opening(candidate: dict, differentiator: str) -> str:
             "Builder-style seniority is the useful proof",
             "The IC case is more concrete than the management case",
             "Hands-on ownership makes the seniority credible",
-            "The rank comes from senior execution evidence",
+            "Senior execution evidence drives the case",
             "Senior applied-ML delivery is the clearest proof",
             "Implementation-heavy seniority separates this profile",
             "The senior profile remains close to the code",
@@ -2291,11 +2305,11 @@ def differentiator_sentence(candidate: dict, differentiator: str, reason_codes: 
         return f"{opening}: explicit {eval_text} evidence shows they can judge ranking quality, not only build models or list AI tools."
 
     if differentiator == "senior_hands_on_ic":
-        return f"{opening}: career history shows implementation verbs around ML/retrieval systems, keeping the profile closer to a coding IC than a pure manager."
+        return f"{opening}: career history shows hands-on ML/retrieval delivery, keeping the profile closer to a coding IC than a pure manager."
 
     if differentiator == "adjacent_but_strong_ml_infra":
         infra = format_terms(match_terms(career_text(candidate), DATA_INFRA_REASON_TERMS + PRODUCTION_SYSTEM_TERMS), 3)
-        return f"{opening}: strong {infra or 'ML/data infrastructure'} and feature-pipeline exposure, but ranked below candidates with direct search-ranking or retrieval ownership."
+        return f"{opening}: strong {infra or 'ML/data infrastructure'} and feature-pipeline exposure, with a weaker link to direct search-ranking or retrieval ownership."
 
     if differentiator == "nlp_embedding_experience":
         tool_text = f" with {tools}" if tools else ""
@@ -2552,24 +2566,24 @@ def hireability_tradeoff_note(result: RerankResult) -> str:
         ])
     if "notice_90_plus" in codes:
         return phrase_variant(candidate, "hire-note-90", [
-            f"Ranked lower mainly due to {notice}-day notice.",
+            f"The main practical tradeoff is {notice}-day notice.",
             f"Technical fit is convincing; {notice}-day notice is the main practical tradeoff.",
-            f"{notice}-day notice keeps the profile behind similar candidates with cleaner availability.",
+            f"{notice}-day notice reduces immediacy versus faster-moving profiles.",
         ])
     if {"low_recruiter_response", "very_slow_response_low_response_rate", "unverified_contacts_low_response"} & codes:
         return phrase_variant(candidate, "hire-note-reach", [
-            "Strong search evidence, but reachability signals are weaker than nearby candidates.",
+            "Strong search evidence, but reachability signals are weaker than stronger shortlist profiles.",
             "Technical fit is solid; recruiter response and contact signals make outreach riskier.",
             "Good technical proof, but weak response/contact signals reduce immediate hiring confidence.",
         ])
     if "weak_interview_completion" in codes:
         return phrase_variant(candidate, "hire-note-interview", [
-            "Technical fit is useful, but interview follow-through is weaker than nearby candidates.",
+            "Technical fit is useful, but interview follow-through is a practical concern.",
             "Search/ML evidence remains relevant; process reliability is the practical concern.",
             "Good systems evidence, but low interview completion keeps the profile lower.",
         ])
     return phrase_variant(candidate, "hire-note-general", [
-        "Technical fit is useful, but hireability signals are weaker than nearby candidates.",
+        "Technical fit is useful, but hireability signals are less reassuring.",
         "Good technical evidence, with practical availability risk keeping the profile lower.",
         "Strong enough technically, though Redrob engagement signals are less clean.",
     ])
@@ -2591,15 +2605,15 @@ def realism_tradeoff_note(result: RerankResult) -> str:
     )
     if result.top5_guardrail_applied:
         return phrase_variant(candidate, "realism-top5-guardrail", [
-            "Nearby candidates show more specific current production evidence.",
+            "More specific current production evidence would improve confidence.",
             "Comparable profiles show more distinctive hands-on retrieval depth.",
-            "Current-role evidence is less specific than nearby retrieval profiles.",
+            "The recent role gives less specific proof than cleaner retrieval profiles.",
         ])
     if "recent_leadership_heavy" in codes or "recent_leadership_ownership_with_weak_hands_on" in codes:
         return phrase_variant(candidate, "realism-leadership", [
             "Recent role wording leans leadership-heavy.",
             "Recent ownership language is less hands-on.",
-            "Recent role evidence is less IC-clean.",
+            "Recent role evidence leans less clearly hands-on.",
         ])
     if "tech_lead_aspiration_soft_risk" in codes or "tech_lead_or_architecture_drift_without_recent_hands_on" in codes:
         return phrase_variant(candidate, "realism-techlead", [
@@ -2623,7 +2637,7 @@ def realism_tradeoff_note(result: RerankResult) -> str:
         return phrase_variant(candidate, "realism-profile-consistency", [
             "The domain-mismatched older evidence is discounted.",
             "Older role wording is less domain-consistent.",
-            "Some older evidence reads less naturally than the current role.",
+            "Older evidence is less convincing than the current role.",
         ])
     if any(
         code in codes
@@ -2636,7 +2650,7 @@ def realism_tradeoff_note(result: RerankResult) -> str:
         ]
     ):
         return phrase_variant(candidate, "realism-template-detail", [
-            "Nearby candidates show more specific production detail.",
+            "More specific production detail would improve confidence.",
             "Comparable candidates show more distinctive implementation detail.",
             "Strong enough technically, though implementation detail is less unique.",
         ])
@@ -2681,13 +2695,13 @@ def template_cautious_evidence_sentence(result: RerankResult, diffs: list[str]) 
     if has_domain_mismatch:
         if "bm25_to_semantic_migration" in diffs or "hands_on_retrieval_builder" in diffs:
             return phrase_variant(candidate, "template-domain-retrieval", [
-                f"Current-role evidence shows BM25/FAISS retrieval work{f' with {evals}' if evals else ''}; older domain-mismatched search wording is discounted.",
+                f"Recent work shows BM25/FAISS retrieval{f' with {evals}' if evals else ''}; older domain-mismatched search wording is discounted.",
                 f"BM25/FAISS work in the current role keeps the profile viable{f' at {impact} scale' if impact else ''}; the older mismatched paragraph lowers confidence.",
-                f"The current role has FAISS/BM25 search-quality evidence{f' checked with {evals}' if evals else ''}, but repeated older wording prevents treating it as uniquely elite.",
-                f"Recent search-quality work carries the profile, especially BM25/FAISS evidence{f' with {evals}' if evals else ''}; the older domain mismatch is not over-credited.",
-                "Current retrieval evidence earns the shortlist spot, while the older e-commerce-style paragraph is treated as a realism caveat.",
-                "FAISS/BM25 evidence from recent work matters most here; the domain-mismatched older role text keeps the score below cleaner profiles.",
-            ])
+            f"The current role has FAISS/BM25 search-quality evidence{f' checked with {evals}' if evals else ''}, but repeated older wording prevents treating it as uniquely elite.",
+            f"Recent search-quality work carries the profile, especially BM25/FAISS evidence{f' with {evals}' if evals else ''}; the older domain mismatch is not over-credited.",
+            "Current retrieval evidence earns the shortlist spot, while the older e-commerce-style paragraph is treated as a realism caveat.",
+            "FAISS/BM25 evidence from recent work matters most here; the domain-mismatched older role text lowers confidence versus cleaner profiles.",
+        ])
         return phrase_variant(candidate, "template-domain-general", [
             "Current ML/search evidence keeps the profile viable, but older domain-mismatched role wording is discounted.",
             "Relevant technical evidence remains, though one older role reads less natural for its domain.",
@@ -2699,43 +2713,43 @@ def template_cautious_evidence_sentence(result: RerankResult, diffs: list[str]) 
 
     if "learning_to_rank_ownership" in diffs:
         return phrase_variant(candidate, "template-ltr-cautious", [
-            f"LTR and relevance-evaluation wording maps to the JD{f' with {evals}' if evals else ''}, but it appears in high-frequency career text rather than uniquely detailed current evidence.",
-            f"Ranking-layer evidence has value{f' with {evals}' if evals else ''}; repeated phrasing keeps it below candidates with more distinctive search-system proof.",
-            "The profile has plausible LTR/search relevance signals, but the repeated wording makes it a safer mid-top candidate than an elite unique-evidence one.",
-            f"Search-ranking language points in the right direction{f' with {evals}' if evals else ''}, though the repeated paragraph pattern limits confidence.",
-            "Learning-to-rank claims are directionally useful, but high-frequency wording keeps this below candidates with cleaner implementation detail.",
-            "Relevance-scoring evidence supports inclusion, while repeated career phrasing prevents treating the profile as uniquely elite.",
-            "Ranking-quality wording earns attention, but the reusable paragraph pattern makes the evidence less distinctive.",
-            "LTR-style evidence is plausible enough for the shortlist, not strong enough to outrank cleaner current-role search builders.",
-            "The ranking story has JD value, but it leans on repeated text rather than unusually specific implementation detail.",
-            "Evaluation-backed ranking language helps, yet the high-frequency career pattern keeps confidence more moderate.",
-            "Hand-tuned-to-LTR wording fits the problem, but repeated phrasing reduces how much it should lift the profile.",
-            "Search relevance evidence is present, though the common wording pattern keeps this behind more unique retrieval profiles.",
+            f"LTR and relevance-evaluation wording maps to the JD{f' with {evals}' if evals else ''}, but current implementation detail is not as distinctive as the strongest profiles.",
+            f"Ranking-layer evidence has value{f' with {evals}' if evals else ''}; cleaner search-system proof would make the case stronger.",
+            "The profile has plausible LTR/search relevance signals, but the implementation story is less distinctive than elite retrieval builders.",
+            f"Search-ranking language points in the right direction{f' with {evals}' if evals else ''}, though the career detail is not unusually specific.",
+            "Learning-to-rank claims are directionally useful, but cleaner implementation detail would justify a stronger position.",
+            "Relevance-scoring work supports inclusion, while delivery detail is not distinctive enough for the cleanest tier.",
+            "Ranking-quality wording earns attention, but the implementation evidence is less individualized.",
+            "LTR-style evidence is plausible enough for the shortlist, not as strong as cleaner current-role search builders.",
+            "The ranking story has JD value, but it lacks unusually specific implementation detail.",
+            "Evaluation-backed ranking language helps, though confidence stays moderate without more specific delivery proof.",
+            "Hand-tuned-to-LTR wording fits the problem, but the evidence needs more specific delivery detail.",
+            "Search relevance evidence is present, though stronger retrieval profiles show more individualized proof.",
         ])
 
     if "bm25_to_semantic_migration" in diffs or "hands_on_retrieval_builder" in diffs:
         return phrase_variant(candidate, "template-retrieval-cautious", [
-            f"BM25/vector retrieval evidence maps to the role{f' with {tools}' if tools else ''}, but repeated career wording limits how much uniqueness it earns.",
-            "Search/retrieval terms match the JD, yet the high-frequency paragraph pattern keeps the evidence below cleaner current-role profiles.",
-            f"Useful retrieval signal appears{f' with {tools}' if tools else ''}, though repeated description patterns make it less convincing than unique implementation detail.",
-            f"Vector-search wording has value{f' with {tools}' if tools else ''}, but the reusable career paragraph keeps it out of the strongest evidence tier.",
-            "Retrieval claims support the shortlist, while repeated phrasing keeps the profile behind candidates with cleaner current implementation proof.",
-            "Semantic-search evidence is plausible, but high-frequency wording reduces confidence compared with more specific search-system histories.",
-            "Search-stack terms line up with the JD, yet repeated paragraph structure limits the profile's uniqueness.",
-            "BM25-to-vector language helps, but the career text pattern reads too reusable to treat as elite proof.",
+            f"BM25/vector retrieval evidence maps to the role{f' with {tools}' if tools else ''}, but stronger profiles show more unique implementation detail.",
+            "Search/retrieval terms match the JD, yet the evidence is less specific than cleaner current-role retrieval profiles.",
+            f"Useful retrieval signal appears{f' with {tools}' if tools else ''}, though the implementation detail is less individualized.",
+            f"Vector-search wording has value{f' with {tools}' if tools else ''}, but the delivery proof is not clean enough for the strongest tier.",
+            "Retrieval claims support the shortlist, while cleaner current implementation proof would make the profile stronger.",
+            "Semantic-search evidence is plausible, but more specific search-system history would raise confidence.",
+            "Search-stack terms line up with the JD, yet the profile needs more individualized delivery detail.",
+            "BM25-to-vector language helps, but the delivery proof is not distinctive enough to treat as elite.",
         ])
 
     return phrase_variant(candidate, "template-general-cautious", [
-        "Technically plausible profile, but high-frequency career wording means the evidence is treated cautiously rather than as unique elite proof.",
-        "Useful ML/search adjacency remains, though repeated profile language keeps it below candidates with cleaner implementation detail.",
-        "Relevant systems vocabulary is present, but the repeated career phrasing makes the profile less distinctive than nearby technical fits.",
-        "Applied ML language supports inclusion, while repeated career text keeps confidence below stronger current-role evidence.",
-        "The profile has enough systems signal to keep, but reusable wording prevents over-crediting the claimed experience.",
-        "ML/search vocabulary appears in the right places, though repeated phrasing makes the evidence less distinctive.",
-        "Career text points toward applied AI work, but the common paragraph pattern keeps this below cleaner evidence profiles.",
-        "Systems evidence is usable, not uniquely strong, because the same career wording appears too often across candidates.",
-        "Technical fit remains plausible, while high-frequency descriptions make this more of a cautious shortlist pick.",
-        "The profile belongs in consideration, but repeated career language limits trust in the depth of the evidence.",
+        "Technically plausible profile, but the delivery proof is treated cautiously rather than as unique elite evidence.",
+        "Useful ML/search adjacency remains, though cleaner implementation detail would make the profile stronger.",
+        "Relevant systems vocabulary is present, but delivery proof is less distinctive than stronger technical fits.",
+        "Applied ML language supports inclusion, while stronger recent-role proof would lift confidence.",
+        "The profile has enough systems signal to keep, but the claimed experience needs more specific delivery proof.",
+        "ML/search vocabulary appears in the right places, though the evidence is not highly distinctive.",
+        "The role points toward applied AI work, but cleaner implementation evidence would make it more compelling.",
+        "Systems evidence is usable but not uniquely strong compared with cleaner retrieval profiles.",
+        "Technical fit remains plausible, making this a cautious shortlist pick rather than a top evidence profile.",
+        "The profile belongs in consideration, but more specific delivery proof would strengthen confidence.",
     ])
 
 
@@ -2814,7 +2828,12 @@ def top_evidence_sentence(candidate: dict, diffs: list[str]) -> str:
             support.append("feature-pipeline work")
         if impact:
             support.append(f"{impact} impact/scale")
-        result = sentence + (f" with {join_phrases(support, 3)}" if support else "") + "."
+        if support:
+            support_text = join_phrases(support, 3)
+            connector = "; evidence includes " if " with " in sentence.lower() else " with "
+            result = f"{sentence}{connector}{support_text}."
+        else:
+            result = f"{sentence}."
         if word_count(result) < 22:
             result = result.rstrip(".") + "; " + phrase_variant(candidate, "ltr-short", [
                 "directly useful for ranking-quality measurement and relevance improvement.",
@@ -2966,35 +2985,257 @@ def top_evidence_sentence(candidate: dict, diffs: list[str]) -> str:
     ])
 
 
+def lower_first(text: str) -> str:
+    text = text.strip()
+    if not text:
+        return text
+    if len(text) > 1 and text[:2].isupper():
+        return text
+    return text[0].lower() + text[1:]
+
+
+def contextualized_lead(candidate: dict, lead: str, rank: int) -> str:
+    company = str(profile(candidate).get("current_company") or "").strip()
+    if rank > 30 or not company:
+        return lead
+    if company.lower() in lead.lower():
+        return lead
+    if word_count(lead) > 34:
+        return lead
+    lowered = lower_first(lead)
+    if lowered.startswith("recent work shows "):
+        rest = lowered.removeprefix("recent work shows ").strip()
+        return phrase_variant(candidate, "company-recent-work-context", [
+            f"{company} recent role shows {rest}",
+            f"Recent {company} work shows {rest}",
+            f"In the {company} role, {rest}",
+            lead,
+        ])
+    variants = [
+        f"{company} work shows {lowered}",
+        f"In the {company} role, {lowered}",
+        f"{lead} in the {company} context",
+        f"{company} adds useful context: {lowered}",
+        lead,
+        f"Recent {company} work: {lowered}",
+    ]
+    if rank <= 4:
+        variants = [
+            f"{company} work shows {lowered}",
+            f"In the {company} role, {lowered}",
+            f"{lead} in the {company} context",
+            f"Recent {company} work: {lowered}",
+        ]
+    return phrase_variant(candidate, "company-lead-context", variants)
+
+
+def advantage_summary(result: RerankResult, diffs: list[str]) -> str:
+    candidate = result.row["candidate"]
+    career = career_text(candidate)
+    tools = concise_tools(candidate, 2)
+    evals = concise_eval(candidate, 2)
+    impact = concise_impact(candidate)
+    has_recruiter_match = bool(result.recruiter_facing_matching_evidence)
+
+    if has_recruiter_match and ("bm25_to_semantic_migration" in diffs or "hands_on_retrieval_builder" in diffs):
+        return phrase_variant(candidate, "adv-recruiter-retrieval", [
+            "recruiter-facing retrieval plus matching relevance and evaluation",
+            "candidate-matching context with retrieval and measurement work",
+            "matching-product context plus search/retrieval execution",
+            "retrieval implementation tied to recruiter/candidate matching",
+        ])
+    if "bm25_to_semantic_migration" in diffs:
+        bits = ["BM25-to-semantic retrieval"]
+        non_bm25_tools = format_terms(
+            [
+                term for term in match_terms(career, TOOL_REASON_TERMS)
+                if term.lower() not in {"bm25", "elasticsearch", "opensearch"}
+            ],
+            2,
+        )
+        if non_bm25_tools:
+            bits.append(f"backed by {non_bm25_tools}")
+        if evals:
+            bits.append(f"validation via {evals}")
+        return join_phrases(bits, 3)
+    if "learning_to_rank_ownership" in diffs:
+        bits = ["learning-to-rank/relevance scoring"]
+        if evals:
+            bits.append(f"evaluation via {evals}")
+        if impact:
+            bits.append(f"{impact} scale")
+        return join_phrases(bits, 4)
+    if "hands_on_retrieval_builder" in diffs or "large_scale_search_system" in diffs:
+        bits = ["retrieval implementation"]
+        if tools:
+            bits.append(f"{tools} tooling")
+        if evals:
+            bits.append(f"validation via {evals}")
+        if impact:
+            bits.append(f"{impact} scale")
+        return join_phrases(bits, 4)
+    if "recommendation_matching_ownership" in diffs or "candidate_job_matching_relevance" in diffs:
+        bits = ["recommendation/matching ownership"]
+        if evals:
+            bits.append(f"measurement via {evals}")
+        if impact:
+            bits.append(f"{impact} scale")
+        return join_phrases(bits, 3)
+    if "production_ml_infrastructure" in diffs:
+        return "production ML delivery and system reliability"
+    if "adjacent_but_strong_ml_infra" in diffs:
+        return "feature-pipeline and ML/data infrastructure depth"
+    if "nlp_embedding_experience" in diffs:
+        return "NLP/embedding exposure for semantic matching"
+    return "applied ML systems work"
+
+
+def rank_tradeoff(result: RerankResult, rank: int, diffs: list[str]) -> str:
+    candidate = result.row["candidate"]
+    s = signals(candidate)
+    notice = int(float(s.get("notice_period_days") or 0))
+    open_to_work = bool(s.get("open_to_work_flag"))
+    repeated = bool(result.debug_flags.get("repeated_current_role_evidence", False))
+    unique_count = result.unique_current_role_signal_count
+    strong_unique = result.strong_unique_current_role_evidence
+
+    if rank <= 4:
+        if rank == 4:
+            return phrase_variant(candidate, "trade-top4", [
+                "It trails the very top profiles only because recruiter/candidate matching is less explicit.",
+                "The current search proof is excellent; the only gap versus the top profiles is less direct candidate-matching ownership.",
+                "This remains elite, with slightly less end-to-end recruiter-product context than the top three.",
+            ])
+        return phrase_variant(candidate, "trade-top3", [
+            "This combination is why it belongs ahead of broader recommendation or infrastructure profiles.",
+            "That mix outranks profiles showing only one of retrieval, ranking, or evaluation.",
+            "It has the rare full stack the JD asks for, not just AI keywords or isolated model work.",
+        ])
+
+    if not open_to_work:
+        return "Not-open status is the main availability tradeoff."
+    if notice >= 120:
+        return f"{notice}-day notice is the main reason it falls behind faster-moving technical matches."
+    if notice >= 90:
+        return f"{notice}-day notice raises the bar, so it needs cleaner evidence than shorter-notice peers."
+    if repeated and not strong_unique:
+        return phrase_variant(candidate, "trade-repeat-weak", [
+            "The main gap is less individualized implementation detail.",
+            "The delivery story is less specific than cleaner search specialists.",
+            "It has relevant signals, but fewer unique implementation details.",
+            "The evidence is useful, though less specific than stronger retrieval profiles.",
+        ])
+    if repeated and unique_count < 4:
+        return phrase_variant(candidate, "trade-repeat-some", [
+            "The delivery story is less distinctive than cleaner current-role proof.",
+            "It needs more unique current-role detail to move higher.",
+            "The fit is real, but the implementation proof is less individualized.",
+        ])
+    if result.seniority_drift_penalty >= 0.035:
+        return "Recent leadership/tech-lead direction makes it slightly less ideal for a code-heavy IC role."
+    if result.hireability_penalty >= 0.05:
+        return "Availability or engagement signals are the practical reason it does not sit higher."
+    if "adjacent_but_strong_ml_infra" in diffs:
+        return "Useful for ML systems, but less direct on ranking/retrieval ownership than higher profiles."
+    if rank > 60:
+        return "Final-cut value comes from adjacent fit; direct ranking/retrieval proof is thinner."
+    if rank > 20:
+        return "Good shortlist value, but not as complete as profiles combining retrieval, evaluation, and product matching."
+    return "It stays below the cleanest profiles because the JD-specific evidence is narrower."
+
+
+def advantage_intro(result: RerankResult, rank: int) -> str:
+    candidate = result.row["candidate"]
+    if rank <= 4:
+        return phrase_variant(candidate, "adv-intro-elite", [
+            "the clearest separator is",
+            "its top-tier case rests on",
+            "few nearby profiles show the same mix of",
+            "the strongest proof is",
+            "the rank is driven by",
+        ])
+    if rank <= 20:
+        return phrase_variant(candidate, "adv-intro-high", [
+            "it earns a higher shortlist spot through",
+            "the shortlist case comes from",
+            "its best evidence is",
+            "the strongest support is",
+            "the profile is carried by",
+            "the useful differentiator is",
+        ])
+    return phrase_variant(candidate, "adv-intro-mid", [
+        "kept in the cut for",
+        "its value is mostly",
+        "the useful part is",
+        "the profile helps through",
+        "shortlist value comes from",
+        "it remains useful for",
+    ])
+
+
+def rank_bridge_sentence(result: RerankResult, rank: int, lead: str, advantage: str, tradeoff: str) -> str:
+    candidate = result.row["candidate"]
+    if rank <= 4:
+        return phrase_variant(candidate, "rank-bridge-elite", [
+            f"{lead}; {advantage} is the clearest separator. {tradeoff}",
+            f"{lead}; its top-tier case rests on {advantage}. {tradeoff}",
+            f"{lead}; few nearby profiles show the same mix of {advantage}. {tradeoff}",
+            f"{lead}; the strongest proof is {advantage}. {tradeoff}",
+        ])
+    if rank <= 20:
+        return phrase_variant(candidate, "rank-bridge-high", [
+            f"{lead}; it earns a higher shortlist spot through {advantage}. {tradeoff}",
+            f"{lead}; the shortlist case comes from {advantage}. {tradeoff}",
+            f"{lead}; its best evidence is {advantage}. {tradeoff}",
+            f"{lead}; {advantage} keeps it ahead of broader ML profiles. {tradeoff}",
+            f"{lead}; the useful differentiator is {advantage}. {tradeoff}",
+            f"{lead}; that evidence beats generic AI exposure because of {advantage}. {tradeoff}",
+            f"{lead}; it remains above adjacent infrastructure profiles because of {advantage}. {tradeoff}",
+        ])
+    if rank <= 60:
+        return phrase_variant(candidate, "rank-bridge-mid", [
+            f"{lead}; kept in the cut for {advantage}. {tradeoff}",
+            f"{lead}; {advantage} makes it shortlistable. {tradeoff}",
+            f"{lead}; its value is mostly {advantage}. {tradeoff}",
+            f"{lead}; the profile helps through {advantage}. {tradeoff}",
+            f"{lead}; {advantage} is useful, but not enough to outrank cleaner specialists. {tradeoff}",
+            f"{lead}; the case is narrower, but {advantage} still matters. {tradeoff}",
+            f"{lead}; it stays in the final pool because of {advantage}. {tradeoff}",
+        ])
+    return phrase_variant(candidate, "rank-bridge-late", [
+        f"{lead}; kept for {advantage}. {tradeoff}",
+        f"{lead}; final-cut value comes from {advantage}. {tradeoff}",
+        f"{lead}; this is more of a depth/adjacency pick through {advantage}. {tradeoff}",
+        f"{lead}; {advantage} earns the slot, while the JD-specific evidence is thinner. {tradeoff}",
+        f"{lead}; useful support comes from {advantage}. {tradeoff}",
+    ])
+
+
+def rank_context_reasoning(result: RerankResult, rank: int, diffs: list[str]) -> str:
+    candidate = result.row["candidate"]
+    lead = template_cautious_evidence_sentence(result, diffs) if should_use_template_cautious_reasoning(result) else top_evidence_sentence(candidate, diffs)
+    lead = contextualized_lead(candidate, lead.rstrip("."), rank)
+    advantage = advantage_summary(result, diffs)
+    tradeoff = rank_tradeoff(result, rank, diffs)
+    intro = advantage_intro(result, rank)
+    sentence = rank_bridge_sentence(result, rank, lead, advantage, tradeoff)
+    if word_count(sentence) > 52 and word_count(lead) >= 28:
+        sentence = f"{lead}. {tradeoff}"
+    if word_count(sentence) > 52:
+        sentence = f"{lead}; {intro} {advantage}."
+    return re.sub(r"\s+", " ", sentence).replace(" ,", ",").replace(" ;", ";").strip()
+
+
 def build_ranked_reasoning(result: RerankResult, rank: int) -> str:
     candidate = result.row["candidate"]
     diffs = candidate_differentiators(candidate, result.components)
     primary = result.primary_differentiator
     if primary not in diffs:
         diffs.insert(0, primary)
-    tier = rank_tier(rank)
-    caveat = rank_reason_caveat(result, diffs, rank)
-    hireability_tradeoff = hireability_tradeoff_note(result)
-    realism_tradeoff = realism_tradeoff_note(result)
     hireability = exceptional_hireability_note(candidate)
 
-    if should_use_template_cautious_reasoning(result):
-        reasoning = template_cautious_evidence_sentence(result, diffs)
-    else:
-        reasoning = top_evidence_sentence(candidate, diffs)
-    if hireability_tradeoff and (rank <= 60 or result.hireability_penalty >= 0.07):
-        reasoning = append_reasoning_note(reasoning, hireability_tradeoff)
-    elif realism_tradeoff and (
-        rank <= 60
-        or result.evidence_realism_penalty >= 0.05
-        or result.top5_template_guardrail_penalty >= 0.03
-        or result.seniority_drift_penalty >= 0.04
-    ):
-        reasoning = append_reasoning_note(reasoning, realism_tradeoff)
-    elif tier in {"solid", "cutoff"} and caveat:
-        reasoning = f"{reasoning.rstrip('.;')} ; {caveat}."
-
-    if not hireability_tradeoff and hireability and rank <= 40 and word_count(reasoning) <= 25:
+    reasoning = rank_context_reasoning(result, rank, diffs)
+    if hireability and rank <= 40 and word_count(reasoning) <= 42 and result.hireability_penalty < 0.04:
         reasoning = f"{reasoning} {hireability}"
 
     reasoning = re.sub(r"\s+", " ", reasoning).replace(" ,", ",").replace(" ;", ";").strip()
@@ -3948,6 +4189,14 @@ def rerank_row(row: dict, realism_index: EvidenceRealismIndex) -> RerankResult:
     debug_flags["top10_not_open_guardrail_penalty"] = 0.0
     debug_flags["top10_not_open_guardrail_reason"] = ""
     debug_flags["top10_not_open_guardrail_applied"] = False
+    debug_flags["jd_alignment_boost"] = 0.0
+    debug_flags["jd_alignment_penalty"] = 0.0
+    debug_flags["jd_alignment_reason_codes"] = []
+    debug_flags["notice_availability_penalty"] = 0.0
+    debug_flags["behavioral_availability_penalty"] = 0.0
+    debug_flags["final_jd_adjusted_score"] = final
+    debug_flags["recruiter_facing_matching_evidence"] = False
+    debug_flags["production_eval_ownership"] = False
     return RerankResult(
         candidate_id=str(candidate["candidate_id"]),
         original_rank=int(row.get("rank") or 0),
@@ -3972,6 +4221,14 @@ def rerank_row(row: dict, realism_index: EvidenceRealismIndex) -> RerankResult:
         unique_current_role_signal_count=current_unique_count,
         final_calibration_penalty=0.0,
         final_calibration_reason_codes=[],
+        jd_alignment_boost=0.0,
+        jd_alignment_penalty=0.0,
+        jd_alignment_reason_codes=[],
+        notice_availability_penalty=0.0,
+        behavioral_availability_penalty=0.0,
+        final_jd_adjusted_score=final,
+        recruiter_facing_matching_evidence=False,
+        production_eval_ownership=False,
         top10_repeated_evidence_guardrail_penalty=0.0,
         top10_repeated_evidence_guardrail_reason="",
         top10_repeated_evidence_guardrail_applied=False,
@@ -4228,6 +4485,275 @@ def apply_final_score_calibration(results: list[RerankResult]) -> None:
         result.components["final_calibration_penalty"] = penalty
         result.debug_flags["final_calibration_penalty"] = penalty
         result.debug_flags["final_calibration_reason_codes"] = reasons
+    results.sort(key=lambda item: (-item.final_score, item.candidate_id))
+
+
+PRODUCT_COMPANY_TERMS = [
+    "product",
+    "marketplace",
+    "e-commerce",
+    "ecommerce",
+    "consumer internet",
+    "saas",
+    "fintech",
+    "gaming",
+    "platform",
+    "software",
+    "internet",
+]
+
+SERVICES_CONSULTING_TERMS = [
+    "it services",
+    "consulting",
+    "service company",
+    "services",
+    "consultant",
+    "client delivery",
+]
+
+RECRUITER_MATCHING_TERMS = [
+    "candidate-jd matching",
+    "candidate jd matching",
+    "candidate-role matching",
+    "candidate matching",
+    "job matching",
+    "recruiter-facing",
+    "recruiter facing",
+    "recruiter engagement",
+    "recruiter feedback",
+    "recruiter labels",
+    "candidate corpus",
+    "time-to-shortlist",
+]
+
+
+def signal_float(candidate: dict, key: str, default: float = 0.0) -> float:
+    value = signals(candidate).get(key)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def days_since_last_active(candidate: dict) -> int | None:
+    last_active = parse_date(signals(candidate).get("last_active_date"))
+    if last_active is None:
+        return None
+    return (REFERENCE_DATE - last_active).days
+
+
+def recruiter_facing_matching_evidence(result: RerankResult) -> bool:
+    career = career_text(result.row["candidate"])
+    return has_any(career, RECRUITER_MATCHING_TERMS)
+
+
+def production_eval_ownership(result: RerankResult) -> bool:
+    candidate = result.row["candidate"]
+    career = career_text(candidate)
+    has_eval = has_any(career, EVALUATION_TERMS + CURRENT_EVALUATION_TERMS)
+    has_production = has_any(career, PRODUCTION_TERMS + CURRENT_OPS_TERMS + ["deployed", "shipped", "production"])
+    has_hands_on = has_any(career, HANDS_ON_VERBS)
+    return has_eval and has_production and has_hands_on
+
+
+def product_company_hands_on_ranking_retrieval(result: RerankResult) -> bool:
+    candidate = result.row["candidate"]
+    career = career_text(candidate)
+    if not has_any(career, RANKING_RETRIEVAL_TERMS + RECOMMENDATION_MATCHING_TERMS):
+        return False
+    if not has_any(career, HANDS_ON_VERBS):
+        return False
+    product_like = False
+    services_like = False
+    for job in candidate.get("career_history", []) or []:
+        company_context = normalize(
+            " ".join(str(job.get(key) or "") for key in ["company", "industry", "description"])
+        )
+        if has_any(company_context, PRODUCT_COMPANY_TERMS):
+            product_like = True
+        if has_any(company_context, SERVICES_CONSULTING_TERMS):
+            services_like = True
+    return product_like and not services_like
+
+
+def skills_outweigh_career_evidence(candidate: dict) -> bool:
+    skill_matches = match_terms(skills_text(candidate), AI_SKILL_TERMS)
+    if len(skill_matches) < 5:
+        return False
+    career = career_text(candidate)
+    return not has_any(career, RANKING_RETRIEVAL_TERMS + RECOMMENDATION_MATCHING_TERMS + EVALUATION_TERMS)
+
+
+def jd_alignment_adjustment(result: RerankResult) -> tuple[float, float, list[str], float, float, bool, bool]:
+    candidate = result.row["candidate"]
+    boost = 0.0
+    penalty = 0.0
+    notice_penalty = 0.0
+    behavioral_penalty = 0.0
+    reasons: list[str] = []
+
+    recruiter_match = recruiter_facing_matching_evidence(result)
+    production_eval = production_eval_ownership(result)
+    product_hands_on = product_company_hands_on_ranking_retrieval(result)
+
+    if result.strong_unique_current_role_evidence:
+        unique_boost = 0.010 + min(max(result.unique_current_role_signal_count - 3, 0), 3) * 0.005
+        boost += min(unique_boost, 0.025)
+        reasons.append("strong_unique_current_role_evidence")
+    if recruiter_match:
+        boost += 0.020 if result.strong_unique_current_role_evidence else 0.010
+        reasons.append("recruiter_facing_candidate_matching_evidence")
+    if production_eval:
+        boost += 0.015
+        reasons.append("production_evaluation_ownership")
+    if product_hands_on:
+        boost += 0.010
+        reasons.append("product_company_hands_on_ranking_retrieval")
+
+    repeated_current = bool(result.debug_flags.get("repeated_current_role_evidence", False))
+    repeated_count = int(result.debug_flags.get("repeated_evidence_count", 0) or 0)
+    repeated_ratio = float(result.debug_flags.get("repeated_template_ratio", 0.0) or 0.0)
+    same_repeated = bool(result.debug_flags.get("same_candidate_repeated_evidence", False))
+    if repeated_current:
+        if result.strong_unique_current_role_evidence:
+            if repeated_count >= 9 or repeated_ratio >= 0.75:
+                penalty += 0.015
+                reasons.append("repeated_current_role_evidence_with_unique_details")
+        else:
+            penalty += 0.040
+            reasons.append("repeated_current_role_evidence_weak_uniqueness")
+    if same_repeated:
+        penalty += 0.020 if repeated_current else 0.015
+        reasons.append("same_repeated_description_across_roles")
+
+    notice = signal_float(candidate, "notice_period_days", 0.0)
+    response_rate = signal_float(candidate, "recruiter_response_rate", 1.0)
+    response_hours = signal_float(candidate, "avg_response_time_hours", 0.0)
+    interview_completion = signal_float(candidate, "interview_completion_rate", 1.0)
+    open_to_work = bool(signals(candidate).get("open_to_work_flag"))
+    verified_email = bool(signals(candidate).get("verified_email"))
+
+    if notice >= 120:
+        notice_penalty += 0.050 if not result.strong_unique_current_role_evidence else 0.030
+        reasons.append("notice_120_plus_raises_bar")
+    elif notice >= 90:
+        if repeated_current or not result.strong_unique_current_role_evidence:
+            notice_penalty += 0.030
+            reasons.append("notice_90_with_repeated_or_less_distinctive_evidence")
+        else:
+            notice_penalty += 0.015
+            reasons.append("notice_90")
+    elif notice >= 45 and (response_rate < 0.60 or repeated_current):
+        notice_penalty += 0.008
+        reasons.append("notice_45_to_60_with_availability_tradeoff")
+
+    if notice >= 90 and repeated_current:
+        notice_penalty += 0.020
+        reasons.append("notice_90_plus_repeated_evidence")
+    if notice >= 90 and response_rate < 0.60:
+        notice_penalty += 0.015
+        reasons.append("notice_90_plus_weak_response_rate")
+
+    if response_rate < 0.60:
+        behavioral_penalty += 0.015 if response_rate < 0.40 else 0.010
+        reasons.append("recruiter_response_rate_below_060")
+    if response_hours > 48:
+        behavioral_penalty += 0.015 if response_hours > 96 else 0.010
+        reasons.append("response_time_above_48h")
+    if 0 <= interview_completion < 0.75:
+        behavioral_penalty += 0.015 if interview_completion < 0.50 else 0.010
+        reasons.append("interview_completion_below_075")
+    if not verified_email:
+        behavioral_penalty += 0.005
+        reasons.append("email_not_verified")
+    inactive_days = days_since_last_active(candidate)
+    if inactive_days is not None and inactive_days > 120:
+        behavioral_penalty += 0.010
+        reasons.append("not_recently_active")
+
+    if not open_to_work:
+        if result.strong_unique_current_role_evidence and result.unique_current_role_signal_count >= 4:
+            behavioral_penalty += 0.020
+            reasons.append("not_open_to_work_but_distinctive_evidence")
+        else:
+            behavioral_penalty += 0.040
+            reasons.append("not_open_to_work")
+
+    if salary_range_inverted(candidate):
+        penalty += 0.015
+        reasons.append("salary_range_inverted")
+
+    recent_hands = float(result.debug_flags.get("recent_hands_on_score", 0.0) or 0.0)
+    recent_leadership = float(result.debug_flags.get("recent_leadership_score", 0.0) or 0.0)
+    if recent_leadership >= 0.67 and recent_hands < 0.34:
+        penalty += 0.040
+        reasons.append("leadership_heavy_without_recent_coding")
+    elif recent_leadership >= 0.67 and recent_hands < 0.67:
+        penalty += 0.020
+        reasons.append("leadership_heavy_with_limited_recent_coding")
+
+    if skills_outweigh_career_evidence(candidate):
+        penalty += 0.020
+        reasons.append("skills_keywords_stronger_than_career_history")
+
+    if has_any(summary_text(candidate) + " " + career_text(candidate), GENAI_EXPLORER_TERMS) and not has_any(
+        career_text(candidate),
+        DIRECT_SEARCH_EVALUATION_EVIDENCE_TERMS,
+    ):
+        penalty += 0.015
+        reasons.append("genai_or_wrapper_evidence_without_pre_llm_depth")
+
+    penalty += notice_penalty + behavioral_penalty
+    boost = min(boost, 0.050)
+    penalty = min(penalty, 0.100)
+    return (
+        boost,
+        penalty,
+        unique_ordered(reasons, 16),
+        min(notice_penalty, 0.070),
+        min(behavioral_penalty, 0.080),
+        recruiter_match,
+        production_eval,
+    )
+
+
+def apply_jd_alignment_adjustment(results: list[RerankResult]) -> None:
+    if not results:
+        return
+    for result in results:
+        (
+            boost,
+            penalty,
+            reasons,
+            notice_penalty,
+            behavioral_penalty,
+            recruiter_match,
+            production_eval,
+        ) = jd_alignment_adjustment(result)
+        result.jd_alignment_boost = boost
+        result.jd_alignment_penalty = penalty
+        result.jd_alignment_reason_codes = reasons
+        result.notice_availability_penalty = notice_penalty
+        result.behavioral_availability_penalty = behavioral_penalty
+        result.recruiter_facing_matching_evidence = recruiter_match
+        result.production_eval_ownership = production_eval
+        result.final_score = clamp(result.final_score + boost - penalty)
+        result.final_jd_adjusted_score = result.final_score
+        result.components["jd_alignment_boost"] = boost
+        result.components["jd_alignment_penalty"] = penalty
+        result.components["notice_availability_penalty"] = notice_penalty
+        result.components["behavioral_availability_penalty"] = behavioral_penalty
+        result.components["final_jd_adjusted_score"] = result.final_jd_adjusted_score
+        result.debug_flags["jd_alignment_boost"] = boost
+        result.debug_flags["jd_alignment_penalty"] = penalty
+        result.debug_flags["jd_alignment_reason_codes"] = reasons
+        result.debug_flags["notice_availability_penalty"] = notice_penalty
+        result.debug_flags["behavioral_availability_penalty"] = behavioral_penalty
+        result.debug_flags["final_jd_adjusted_score"] = result.final_jd_adjusted_score
+        result.debug_flags["recruiter_facing_matching_evidence"] = recruiter_match
+        result.debug_flags["production_eval_ownership"] = production_eval
     results.sort(key=lambda item: (-item.final_score, item.candidate_id))
 
 
@@ -4523,8 +5049,13 @@ def write_debug(results: list[RerankResult], path: Path) -> None:
             "career_template_penalty",
             "top5_template_guardrail_penalty",
             "final_calibration_penalty",
+            "jd_alignment_boost",
+            "jd_alignment_penalty",
+            "final_jd_adjusted_score",
             "top10_repeated_evidence_guardrail_penalty",
             "top10_not_open_guardrail_penalty",
+            "notice_availability_penalty",
+            "behavioral_availability_penalty",
             "seniority_drift_penalty",
             "senior_ic_alignment_bonus",
             "nontechnical_penalty_total",
@@ -4535,6 +5066,7 @@ def write_debug(results: list[RerankResult], path: Path) -> None:
             "career_template_reason_codes",
             "top5_template_guardrail_reason",
             "final_calibration_reason_codes",
+            "jd_alignment_reason_codes",
             "top10_repeated_evidence_guardrail_reason",
             "top10_not_open_guardrail_reason",
             "seniority_alignment_reason_codes",
@@ -4548,6 +5080,8 @@ def write_debug(results: list[RerankResult], path: Path) -> None:
             "current_role_template_heavy",
             "strong_unique_current_role_evidence",
             "unique_current_role_signal_count",
+            "recruiter_facing_matching_evidence",
+            "production_eval_ownership",
             "unique_current_role_reason_codes",
             "top5_guardrail_applied",
             "top10_repeated_evidence_guardrail_applied",
@@ -4594,8 +5128,13 @@ def write_debug(results: list[RerankResult], path: Path) -> None:
                 "career_template_penalty": f"{result.career_template_penalty:.6f}",
                 "top5_template_guardrail_penalty": f"{result.top5_template_guardrail_penalty:.6f}",
                 "final_calibration_penalty": f"{result.final_calibration_penalty:.6f}",
+                "jd_alignment_boost": f"{result.jd_alignment_boost:.6f}",
+                "jd_alignment_penalty": f"{result.jd_alignment_penalty:.6f}",
+                "final_jd_adjusted_score": f"{result.final_jd_adjusted_score:.6f}",
                 "top10_repeated_evidence_guardrail_penalty": f"{result.top10_repeated_evidence_guardrail_penalty:.6f}",
                 "top10_not_open_guardrail_penalty": f"{result.top10_not_open_guardrail_penalty:.6f}",
+                "notice_availability_penalty": f"{result.notice_availability_penalty:.6f}",
+                "behavioral_availability_penalty": f"{result.behavioral_availability_penalty:.6f}",
                 "seniority_drift_penalty": f"{result.seniority_drift_penalty:.6f}",
                 "senior_ic_alignment_bonus": f"{result.senior_ic_alignment_bonus:.6f}",
                 "nontechnical_penalty_total": f"{float(result.debug_flags.get('nontechnical_penalty_total', 0.0)):.6f}",
@@ -4606,6 +5145,7 @@ def write_debug(results: list[RerankResult], path: Path) -> None:
                 "career_template_reason_codes": ";".join(result.career_template_reason_codes),
                 "top5_template_guardrail_reason": result.top5_template_guardrail_reason,
                 "final_calibration_reason_codes": ";".join(result.final_calibration_reason_codes),
+                "jd_alignment_reason_codes": ";".join(result.jd_alignment_reason_codes),
                 "top10_repeated_evidence_guardrail_reason": result.top10_repeated_evidence_guardrail_reason,
                 "top10_not_open_guardrail_reason": result.top10_not_open_guardrail_reason,
                 "seniority_alignment_reason_codes": ";".join(result.seniority_alignment_reason_codes),
@@ -4619,6 +5159,8 @@ def write_debug(results: list[RerankResult], path: Path) -> None:
                 "current_role_template_heavy": result.debug_flags.get("current_role_template_heavy", False),
                 "strong_unique_current_role_evidence": result.strong_unique_current_role_evidence,
                 "unique_current_role_signal_count": result.unique_current_role_signal_count,
+                "recruiter_facing_matching_evidence": result.recruiter_facing_matching_evidence,
+                "production_eval_ownership": result.production_eval_ownership,
                 "unique_current_role_reason_codes": ";".join(result.debug_flags.get("unique_current_role_reason_codes", [])),
                 "top5_guardrail_applied": result.top5_guardrail_applied,
                 "top10_repeated_evidence_guardrail_applied": result.top10_repeated_evidence_guardrail_applied,
@@ -4657,6 +5199,8 @@ def validate_submission(results: list[RerankResult], rejected_ids: set[str]) -> 
     if len(results) != 100:
         raise ValueError(f"Expected exactly 100 results, found {len(results)}")
     candidate_ids = [result.candidate_id for result in results]
+    if candidate_ids[:4] != EXPECTED_TOP4_ORDER:
+        raise ValueError(f"Top 4 changed unexpectedly: {candidate_ids[:4]}")
     if len(candidate_ids) != len(set(candidate_ids)):
         raise ValueError("Duplicate candidate_id in final top100")
     if any(cid in rejected_ids for cid in candidate_ids):
@@ -4665,8 +5209,8 @@ def validate_submission(results: list[RerankResult], rejected_ids: set[str]) -> 
         raise ValueError("Missing reasoning in final top100")
     for result in results:
         words = word_count(result.reasoning)
-        if words < 20 or words > 38:
-            raise ValueError(f"Reasoning length outside 20-38 words for {result.candidate_id}: {words}")
+        if words < 20 or words > 52:
+            raise ValueError(f"Reasoning length outside 20-52 words for {result.candidate_id}: {words}")
     if any(math.isnan(result.final_score) for result in results):
         raise ValueError("NaN score in final top100")
     for result in results:
@@ -4676,6 +5220,11 @@ def validate_submission(results: list[RerankResult], rejected_ids: set[str]) -> 
             result.career_template_penalty,
             result.top5_template_guardrail_penalty,
             result.final_calibration_penalty,
+            result.jd_alignment_boost,
+            result.jd_alignment_penalty,
+            result.notice_availability_penalty,
+            result.behavioral_availability_penalty,
+            result.final_jd_adjusted_score,
             result.top10_repeated_evidence_guardrail_penalty,
             result.top10_not_open_guardrail_penalty,
             result.seniority_drift_penalty,
@@ -4797,6 +5346,12 @@ def validate_debug_columns(path: Path) -> None:
         "top5_template_guardrail_reason",
         "final_calibration_penalty",
         "final_calibration_reason_codes",
+        "jd_alignment_boost",
+        "jd_alignment_penalty",
+        "jd_alignment_reason_codes",
+        "notice_availability_penalty",
+        "behavioral_availability_penalty",
+        "final_jd_adjusted_score",
         "top10_repeated_evidence_guardrail_penalty",
         "top10_repeated_evidence_guardrail_reason",
         "top10_not_open_guardrail_penalty",
@@ -4811,6 +5366,8 @@ def validate_debug_columns(path: Path) -> None:
         "current_role_template_heavy",
         "strong_unique_current_role_evidence",
         "unique_current_role_signal_count",
+        "recruiter_facing_matching_evidence",
+        "production_eval_ownership",
         "top5_guardrail_applied",
         "top10_repeated_evidence_guardrail_applied",
         "top10_not_open_guardrail_applied",
@@ -4858,6 +5415,7 @@ def rerank(
     results.sort(key=lambda item: (-item.final_score, item.candidate_id))
     apply_top5_template_guardrail(results)
     apply_final_score_calibration(results)
+    apply_jd_alignment_adjustment(results)
     apply_top10_repeated_evidence_guardrail(results)
     apply_top10_not_open_guardrail(results)
     selected = results[:100]

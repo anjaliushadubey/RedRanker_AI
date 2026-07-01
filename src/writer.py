@@ -13,7 +13,6 @@ class SubmissionRow:
     score: float
     reasoning: str
 
-
 def write_submission(rows: list[SubmissionRow], output_path: Path) -> None:
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)

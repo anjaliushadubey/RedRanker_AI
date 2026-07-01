@@ -7,3 +7,4 @@ tqdm==4.67.1
 rapidfuzz==3.14.3
 qdrant-client==1.18.0
 sentence-transformers==5.6.0
+streamlit>=1.36,<2.0
