@@ -28,7 +28,8 @@ from src.scorer import score_candidate
 from src.traps import trap_penalty
 
 
-SAMPLE_PATH = Path("sample_candidates.jsonl")
+APP_DIR = Path(__file__).resolve().parent
+SAMPLE_PATH = APP_DIR / "sample_candidates.jsonl"
 OUTPUT_COLUMNS = ["candidate_id", "rank", "score", "reasoning"]
 
 
@@ -170,6 +171,11 @@ def parse_candidates_text(text: str, filename: str = "uploaded.jsonl") -> list[d
 
 
 def load_sample_candidates() -> list[dict[str, Any]]:
+    if not SAMPLE_PATH.exists():
+        raise FileNotFoundError(
+            "Bundled sample_candidates.jsonl was not found. "
+            "Upload a small JSONL/JSON/CSV file or commit sample_candidates.jsonl to the repo."
+        )
     return parse_candidates_text(SAMPLE_PATH.read_text(encoding="utf-8"), SAMPLE_PATH.name)
 
 
@@ -349,13 +355,20 @@ def main() -> None:
     st.caption("Small-sample sandbox demo. The full 100K candidate pipeline is unchanged.")
 
     uploaded = st.file_uploader("Upload a small candidate file", type=["jsonl", "json", "csv"])
-    use_sample = st.checkbox("Use included sample_candidates.jsonl", value=uploaded is None)
+    sample_available = SAMPLE_PATH.exists()
+    use_sample = st.checkbox(
+        "Use included sample_candidates.jsonl",
+        value=uploaded is None and sample_available,
+        disabled=not sample_available,
+    )
     top_n = st.slider("Rows to output", min_value=1, max_value=100, value=20)
 
     if uploaded is not None:
         st.info(f"Uploaded `{uploaded.name}` ({uploaded.size:,} bytes).")
     elif use_sample:
-        st.info(f"Using bundled `{SAMPLE_PATH}`.")
+        st.info(f"Using bundled `{SAMPLE_PATH.name}`.")
+    elif not sample_available:
+        st.warning("Bundled sample file is missing. Upload a candidate file or push `sample_candidates.jsonl` to GitHub.")
     else:
         st.warning("Upload a file or enable the bundled sample.")
 
