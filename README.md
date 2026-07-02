@@ -11,6 +11,126 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
+## Architecture: How RedRanker AI Works
+
+RedRanker AI is built as a staged candidate-discovery pipeline. The main idea is to avoid ranking people only because their skills section contains AI keywords. The system first removes clearly invalid or low-trust profiles, then retrieves a broad high-recall candidate pool, and finally reranks the shortlist using career-history evidence, JD fit, Redrob behavior signals, and profile realism checks.
+
+```text
+candidates.jsonl + JD understanding
+        |
+        v
+JSONL streaming loader
+        |
+        v
+Hard rejection + honeypot filtering
+        |
+        v
+eligible_candidates.jsonl
+        |
+        v
+Section-wise embeddings + BM25 sparse text
+        |
+        v
+Qdrant dense retrieval + BM25 lexical retrieval
+        |
+        v
+Hybrid top-2000 retrieval
+        |
+        v
+Evidence-based top-100 reranker
+        |
+        v
+Grounded reasoning + validation
+        |
+        v
+submission.csv
+```
+
+### 1. Streaming Candidate Loading
+
+The full candidate file is JSONL, so the pipeline reads it line by line instead of loading the entire dataset into memory. This keeps the project practical on a normal laptop and avoids unnecessary memory pressure on the 100K-candidate pool.
+
+### 2. Hard Rejection Before Embeddings
+
+Before any expensive retrieval work, `rank.py` and the rejection modules remove candidates who clearly should not enter the ranking pool. This includes:
+
+- no real relevance to AI, ML, ranking, retrieval, matching, search, or production systems
+- fake AI-fit profiles where AI keywords appear only in summary or skills
+- GenAI explorer / ChatGPT productivity users without real AI engineering work
+- pure research-only candidates without production deployment evidence
+- senior architect / manager / tech-lead profiles without recent hands-on production coding
+- CV, speech, or robotics-heavy profiles without meaningful NLP or IR exposure
+- severe Redrob availability or contact-trust failures
+- honeypot-like profiles with impossible dates, impossible skill durations, repeated templates, or timeline inconsistencies
+
+This stage produces `eligible_candidates.jsonl`. The goal is not to reject every imperfect candidate; it is to prevent obvious non-fits and traps from being embedded and retrieved as false positives.
+
+### 3. Section-Wise Embedding Preparation
+
+`prepare_embeddings.py` embeds only candidates that survived hard rejection. It creates separate dense vectors for:
+
+- `title`
+- `summary`
+- `career_history`
+- `skills`
+
+Education is not embedded as a dense section, but it remains in the BM25 sparse text. This keeps semantic retrieval focused on the evidence most relevant to the JD while preserving exact-match information in the sparse layer.
+
+The embedding stage uses `sentence-transformers/paraphrase-MiniLM-L6-v2`, clips long section text, skips empty sections with zero vectors, deduplicates identical section text, sorts by length before encoding, and saves per-section `.npz` caches. JD query embeddings and BM25 scores are cached too, so repeated runs do not recompute fixed artifacts.
+
+### 4. Hybrid Retrieval With Qdrant + BM25
+
+`top2000.py` builds the high-recall retrieval pool. Dense retrieval uses Qdrant to store and search section-wise vectors. BM25 runs on full sparse candidate text to preserve exact JD signals such as `BM25`, `FAISS`, `ranking`, `NDCG`, `MRR`, `candidate matching`, and `production ML`.
+
+The retrieval score blends:
+
+```text
+70% dense semantic score + 30% BM25 lexical score
+```
+
+This gives the system both semantic recall and exact technical matching. The output is:
+
+- `top_2000_candidates.csv`
+- `top_2000_candidates.jsonl`
+
+### 5. Evidence-Based Final Reranking
+
+`rerank_top100.py` treats the top-2000 list as a recall pool, not the final answer. It reranks candidates using JD-specific evidence from the candidate record, especially career history. The final score considers:
+
+- real career evidence for retrieval, ranking, search, recommendation, matching, and evaluation
+- JD pillar coverage across ranking, retrieval, embeddings, production ML, evaluation, and Python/system work
+- hands-on builder depth versus leadership-only wording
+- seniority fit around the preferred 5-9 year range
+- Redrob availability signals such as open-to-work, notice period, response rate, and interview completion
+- location/logistics fit for Pune, Noida, Hyderabad, Mumbai, and Delhi NCR
+- realism penalties for repeated career templates, domain mismatch, weak uniqueness, and suspicious timelines
+
+This stage intentionally down-ranks candidates whose AI evidence is mostly keyword overlap, copied-looking text, or unsupported skills.
+
+### 6. Grounded Reasoning and Validation
+
+The reasoning column is generated with deterministic rules, not an LLM. Each explanation is based only on candidate-record evidence and is designed to explain the candidate's strongest rank-specific advantage and any important tradeoff.
+
+The final output is validated for:
+
+- 100 unique candidates ranked 1-100
+- descending scores with no invalid values
+- no rejected candidate included
+- non-empty grounded reasoning
+- schema compatibility with `validate_submission.py`
+
+### Full Pipeline vs Demo Pipeline
+
+The full pipeline uses hard rejection, cached SentenceTransformer embeddings, Qdrant, BM25, top-2000 retrieval, final reranking, and validation. The Streamlit demo uses a small uploaded sample and skips full-pool embedding/Qdrant indexing so it can run quickly in a hosted sandbox while preserving the same output schema and main ranking logic.
+
+### Runtime Strategy: Precompute Once, Rank Fast
+
+To keep runtime within the CPU-only constraint, RedRanker AI separates expensive preparation from fast ranking. Section-wise SentenceTransformer embeddings are computed once after hard rejection and stored as cached `.npz` files. The fixed JD query embeddings and BM25 scores are also precomputed and cached.
+
+Qdrant stores the dense candidate vectors locally, so repeated top-2000 retrieval runs do not need to recreate embeddings. After the caches exist, the ranking path mainly loads cached artifacts, runs Qdrant/BM25 retrieval, reranks the top 2000, writes `submission.csv`, and validates it.
+
+The final reranking and reasoning stages are rule-based and do not call an LLM. This keeps the output deterministic, explainable, and fast enough for the hackathon runtime constraints.
+
 ## Streamlit Demo
 
 This repository includes a lightweight hosted demo for the hackathon sandbox requirement. It does not run the full 100K-candidate embedding pipeline. Instead, it accepts a small JSONL, JSON, or CSV sample, applies the same hard-reject layer, computes a lightweight hybrid starting score, reuses the final evidence-based reranker, and outputs the standard CSV schema:
