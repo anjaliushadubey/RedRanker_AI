@@ -244,7 +244,7 @@ def dataframe_to_csv_bytes(frame: pd.DataFrame) -> bytes:
 
 
 def render_scrollable_results(frame: pd.DataFrame) -> None:
-    """Render results as a wide table with horizontal scrolling."""
+    """Render results as one polished wide table with a single horizontal scrollbar."""
     import streamlit.components.v1 as components
 
     rows_html = []
@@ -259,54 +259,86 @@ def render_scrollable_results(frame: pd.DataFrame) -> None:
         )
 
     table_html = "\n".join(rows_html)
-    height = min(720, max(180, 72 + 46 * len(frame)))
+    height = min(760, max(210, 98 + 52 * len(frame)))
     components.html(
         f"""<!doctype html>
         <html>
         <head>
         <meta charset="utf-8">
         <style>
+          html {{
+            overflow: hidden;
+          }}
           body {{
             margin: 0;
             font-family: "Source Sans Pro", sans-serif;
             color: #111827;
+            overflow: hidden;
+            background: transparent;
+          }}
+          .table-card {{
+            border: 1px solid #d8dee8;
+            border-radius: 12px;
+            background: #ffffff;
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+            overflow: hidden;
           }}
           .scroll-table-wrap {{
             width: 100%;
+            max-width: 100%;
             overflow-x: auto;
-            overflow-y: auto;
-            border: 1px solid #d1d5db;
-            border-radius: 8px;
+            overflow-y: hidden;
             background: #ffffff;
+            scrollbar-color: #94a3b8 #eef2f7;
+            scrollbar-width: thin;
+          }}
+          .scroll-table-wrap::-webkit-scrollbar {{
+            height: 10px;
+          }}
+          .scroll-table-wrap::-webkit-scrollbar-track {{
+            background: #eef2f7;
+            border-radius: 999px;
+          }}
+          .scroll-table-wrap::-webkit-scrollbar-thumb {{
+            background: #94a3b8;
+            border-radius: 999px;
+          }}
+          .scroll-table-wrap::-webkit-scrollbar-thumb:hover {{
+            background: #64748b;
           }}
           .scroll-table {{
             border-collapse: collapse;
-            min-width: 1900px;
-            width: 1900px;
-            font-size: 0.94rem;
+            min-width: 1780px;
+            width: 1780px;
+            font-size: 0.93rem;
           }}
           .scroll-table th {{
-            position: sticky;
-            top: 0;
-            z-index: 1;
-            background: #f9fafb;
-            color: #374151;
+            background: linear-gradient(180deg, #f8fafc, #f1f5f9);
+            color: #172033;
             text-align: left;
-            font-weight: 600;
-            border-bottom: 1px solid #e5e7eb;
-            padding: 10px 12px;
+            font-weight: 700;
+            border-bottom: 1px solid #d8dee8;
+            padding: 12px 14px;
             white-space: nowrap;
           }}
           .scroll-table td {{
             border-top: 1px solid #eef0f3;
-            padding: 10px 12px;
+            padding: 12px 14px;
             white-space: nowrap;
             vertical-align: top;
             color: #111827;
           }}
+          .scroll-table tbody tr:nth-child(even) {{
+            background: #fbfdff;
+          }}
+          .scroll-table tbody tr:hover {{
+            background: #eff6ff;
+          }}
           .scroll-table th:nth-child(1),
           .scroll-table td:nth-child(1) {{
             width: 170px;
+            font-weight: 600;
+            color: #0f172a;
           }}
           .scroll-table th:nth-child(2),
           .scroll-table td:nth-child(2) {{
@@ -318,32 +350,35 @@ def render_scrollable_results(frame: pd.DataFrame) -> None:
             width: 120px;
           }}
           .scroll-table .reasoning-cell {{
-            min-width: 1450px;
+            min-width: 1320px;
             max-width: none;
+            color: #1f2937;
           }}
         </style>
         </head>
         <body>
-        <div class="scroll-table-wrap">
-          <table class="scroll-table">
-            <thead>
-              <tr>
-                <th>candidate_id</th>
-                <th>rank</th>
-                <th>score</th>
-                <th>reasoning</th>
-              </tr>
-            </thead>
-            <tbody>
-              {table_html}
-            </tbody>
-          </table>
+        <div class="table-card">
+          <div class="scroll-table-wrap">
+            <table class="scroll-table">
+              <thead>
+                <tr>
+                  <th>candidate_id</th>
+                  <th>rank</th>
+                  <th>score</th>
+                  <th>reasoning</th>
+                </tr>
+              </thead>
+              <tbody>
+                {table_html}
+              </tbody>
+            </table>
+          </div>
         </div>
         </body>
         </html>
         """,
         height=height,
-        scrolling=True,
+        scrolling=False,
     )
 
 
