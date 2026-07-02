@@ -386,8 +386,7 @@ def main() -> None:
     import streamlit as st
 
     st.set_page_config(page_title="RedRanker AI Demo", layout="wide")
-    st.title("RedRanker AI Candidate Ranking Demo")
-    st.caption("Small-sample sandbox demo. The full 100K candidate pipeline is unchanged.")
+    st.title("RedRanker_AI")
 
     uploaded = st.file_uploader("Upload a small candidate file", type=["jsonl", "json", "csv"])
     sample_available = SAMPLE_PATH.exists()
